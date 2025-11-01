@@ -128,7 +128,7 @@ func main() {
 	}
 
 	// Install CNI (Calico)
-	log.Println("🌐 Installing Calico CNI...")
+	log.Println("🌐 Installing Flannel CNI...")
 	if err := installCalico(config); err != nil {
 		log.Fatalf("❌ Failed to install Calico: %v", err)
 	}
@@ -734,27 +734,21 @@ func saveKubeconfig(config ClusterConfig) error {
 }
 
 func installCalico(config ClusterConfig) error {
-	// Install Tigera operator and custom resources in one command to avoid hanging
-	log.Println("  Installing Calico CNI...")
-	installScript := fmt.Sprintf(`
-		kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml
-		sleep 10
-		curl -sS -O https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/custom-resources.yaml
-		sed -i 's#cidr: 192\.168\.0\.0/16#cidr: %s#g' custom-resources.yaml
-		kubectl create -f custom-resources.yaml
-	`, config.PodCIDR)
+	// Install Flannel CNI (uses quay.io, avoids Docker Hub rate limiting)
+	log.Println("  Installing Flannel CNI...")
+	installCmd := `kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml`
 
-	cmd := exec.Command("multipass", "exec", config.ControlPlane.Name, "--", "bash", "-c", installScript)
+	cmd := exec.Command("multipass", "exec", config.ControlPlane.Name, "--", "bash", "-c", installCmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("Calico installation output: %s\n", string(output))
-		return fmt.Errorf("failed to install Calico: %w", err)
+		log.Printf("Flannel installation output: %s\n", string(output))
+		return fmt.Errorf("failed to install Flannel: %w", err)
 	}
 
-	log.Println("  Waiting for Calico to be ready...")
+	log.Println("  Waiting for Flannel to be ready...")
 	time.Sleep(30 * time.Second)
 
-	log.Println("  ✓ Calico CNI installed")
+	log.Println("  ✓ Flannel CNI installed")
 	return nil
 }
 

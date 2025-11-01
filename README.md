@@ -7,7 +7,7 @@ Multi-cluster Kubernetes deployment system for DEV and PROD environments using M
 This repository provides automated installers for deploying Kubernetes clusters in DEV and PROD environments. Each cluster includes:
 
 - **Kubernetes 1.30** - Latest stable release
-- **Calico CNI** - Container networking
+- **Flannel CNI** - Container networking (uses quay.io, avoids Docker Hub rate limiting)
 - **kube-prometheus-stack** - Monitoring with Prometheus + Grafana
 - **Ingress NGINX** - Ingress controller
 - **ArgoCD** (DEV only) - GitOps continuous delivery
@@ -152,8 +152,8 @@ cd installers
 ### Check component status
 
 ```bash
-# Check Calico
-kubectl get pods -n calico-system
+# Check Flannel CNI
+kubectl get pods -n kube-flannel
 
 # Check monitoring
 kubectl get pods -n monitoring
