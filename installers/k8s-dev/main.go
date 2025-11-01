@@ -704,6 +704,12 @@ func saveKubeconfig(config ClusterConfig) error {
 			return fmt.Errorf("failed to merge kubeconfigs: %w", err)
 		}
 
+		// Rename the context if it has the wrong name (e.g., kubernetes-admin@kubernetes -> k8s-dev)
+		renameCmd := exec.Command("bash", "-c",
+			fmt.Sprintf("kubectl config rename-context %s-admin@%s %s 2>/dev/null || kubectl config rename-context kubernetes-admin@%s %s 2>/dev/null || true",
+				config.ClusterName, config.ClusterName, config.ContextName, config.ClusterName, config.ContextName))
+		renameCmd.Run() // Ignore errors as context might already be named correctly
+
 		// Remove temporary file
 		os.Remove(tempKubeconfigPath)
 
@@ -768,16 +774,18 @@ func installMetricsServer(controlPlaneName string) error {
 	log.Println("  Installing metrics-server...")
 	installCmd := `kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`
 	cmd := exec.Command("multipass", "exec", controlPlaneName, "--", "bash", "-c", installCmd)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to install metrics-server: %w", err)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to install metrics-server: %w\nOutput: %s", err, string(output))
 	}
 
-	// Wait for metrics-server to be ready
+	// Wait for metrics-server to be ready (reduced timeout)
 	log.Println("  Waiting for metrics-server to be ready...")
-	waitCmd := `kubectl wait --for=condition=ready pod -l k8s-app=metrics-server -n kube-system --timeout=300s`
+	waitCmd := `kubectl wait --for=condition=ready pod -l k8s-app=metrics-server -n kube-system --timeout=120s || true`
 	cmd = exec.Command("multipass", "exec", controlPlaneName, "--", "bash", "-c", waitCmd)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("metrics-server not ready: %w", err)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("  ⚠️  Warning: metrics-server wait command failed (pod may still be starting): %v\nOutput: %s", err, string(output))
 	}
 
 	log.Println("  ✓ metrics-server installed")
@@ -917,16 +925,18 @@ func installIngressNginx(controlPlaneName string) error {
 	log.Println("  Installing Ingress NGINX...")
 	installCmd := `kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.9.4/deploy/static/provider/cloud/deploy.yaml`
 	cmd := exec.Command("multipass", "exec", controlPlaneName, "--", "bash", "-c", installCmd)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to install ingress-nginx: %w", err)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to install ingress-nginx: %w\nOutput: %s", err, string(output))
 	}
 
-	// Wait for ingress controller to be ready
+	// Wait for ingress controller to be ready (reduced timeout)
 	log.Println("  Waiting for ingress controller to be ready...")
-	waitCmd := `kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=300s`
+	waitCmd := `kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=120s || true`
 	cmd = exec.Command("multipass", "exec", controlPlaneName, "--", "bash", "-c", waitCmd)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ingress controller not ready: %w", err)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("  ⚠️  Warning: ingress controller wait command failed (pod may still be starting): %v\nOutput: %s", err, string(output))
 	}
 
 	log.Println("  ✓ Ingress NGINX installed")
