@@ -1,93 +1,163 @@
 # Kubernetes Infrastructure
 
-This repository contains automated Kubernetes cluster installers for both DEV and PROD environments using Multipass VMs.
+Multi-cluster Kubernetes deployment system for DEV and PROD environments using Multipass VMs.
 
-## Architecture
+## Overview
 
-- **DEV Environment**: Go-based installer (`go-installer/`) - Fast iterations and development
-- **PROD Environment**: Rust-based installer (`rust-installer/`) - Optimized performance and stability
+This repository provides automated installers for deploying Kubernetes clusters in DEV and PROD environments. Each cluster includes:
 
-Both installers create a 3-node Kubernetes cluster with:
-- 1 control plane node
-- 2 worker nodes
-- Calico CNI
-- metrics-server
-- Helm 3
-- kube-prometheus-stack (Prometheus + Grafana)
-- NGINX Ingress Controller
+- **Kubernetes 1.30** - Latest stable release
+- **Calico CNI** - Container networking
+- **kube-prometheus-stack** - Monitoring with Prometheus + Grafana
+- **Ingress NGINX** - Ingress controller
+- **ArgoCD** (DEV only) - GitOps continuous delivery
+- **Multi-cluster management** - Merged kubeconfig for easy context switching
 
 ## Quick Start
 
-### DEV Cluster (Go)
+### Prerequisites
+
+- [Multipass](https://multipass.run/) - VM manager
+- [kubectl](https://kubernetes.io/docs/tasks/tools/) - Kubernetes CLI
+- [Go 1.21+](https://go.dev/doc/install) - For DEV cluster
+- [Rust](https://rustup.rs/) - For PROD cluster
+
+### Install DEV Cluster
+
 ```bash
-cd go-installer
-go run k8s-installer.go
+cd installers
+./install-dev.sh
 ```
 
-### PROD Cluster (Rust)
+The DEV cluster will be deployed with these nodes:
+- `k8s-dev-c1` - Control plane
+- `k8s-dev-w1` - Worker 1
+- `k8s-dev-w2` - Worker 2
+
+### Install PROD Cluster
+
 ```bash
-cd rust-installer
-cargo build --release
-./target/release/k8s-installer
+cd installers
+./install-prd.sh
 ```
 
-## Prerequisites
+The PROD cluster will be deployed with these nodes:
+- `k8s-prd-c1` - Control plane
+- `k8s-prd-w1` - Worker 1
+- `k8s-prd-w2` - Worker 2
 
-Both installers require:
-- [Multipass](https://multipass.run/) installed and running
-- kubectl installed locally
-- Sufficient system resources (recommend 16GB+ RAM, 50GB+ disk)
+## Multi-Cluster Management
 
-## Features
+Both clusters are automatically added to your `~/.kube/config` with distinct context names.
 
-### Parallel Operations
-Both installers leverage concurrency for optimal performance:
-- Parallel worker node launch
-- Parallel worker join operations
-- Parallel component installation
-- Smart polling instead of fixed sleeps
+### Switch between clusters
 
-### Monitoring Stack
-- **Prometheus**: Metrics collection and alerting
-- **Grafana**: Pre-configured dashboards (28+ built-in)
-- **metrics-server**: Resource metrics API
-
-### Access Information
-After deployment, access monitoring at:
-- Grafana: `http://<control-plane-ip>:30080`
-- Prometheus: `http://<control-plane-ip>:30090`
-- Default credentials displayed in installer output
-
-## Management
-
-### Common Commands
 ```bash
-# Check cluster status
-kubectl get nodes
-kubectl get pods -A
+# Switch to DEV
+kubectl config use-context k8s-dev
 
-# View metrics
-kubectl top nodes
-kubectl top pods -A
+# Switch to PROD
+kubectl config use-context k8s-prd
 
-# Shell access
-multipass shell <node-name>
+# View all contexts
+kubectl config get-contexts
 
-# Stop cluster
-multipass stop --all
-
-# Start cluster
-multipass start --all
-
-# Delete cluster
-multipass delete --all --purge
+# Check current context
+kubectl config current-context
 ```
 
-## GitOps Integration
+## Accessing Services
 
-These clusters are designed to work with ArgoCD for GitOps-based application deployment. See [k8s-app-manifests](https://github.com/damauer/k8s-app-manifests) repository for application definitions.
+### Monitoring (Both Clusters)
 
-## Deployment Times
+```bash
+# Get Grafana password (DEV)
+kubectl --context k8s-dev get secret -n monitoring kube-prometheus-stack-grafana \
+  -o jsonpath='{.data.admin-password}' | base64 -d
 
-- **Go (DEV)**: ~3-4 minutes (optimized for fast iterations)
-- **Rust (PROD)**: ~10 minutes (includes full stack with monitoring)
+# Get Grafana password (PROD)
+kubectl --context k8s-prd get secret -n monitoring kube-prometheus-stack-grafana \
+  -o jsonpath='{.data.admin-password}' | base64 -d
+
+# Access Grafana: http://<control-plane-ip>:30080
+# Username: admin
+```
+
+### ArgoCD (DEV Only)
+
+```bash
+# Get ArgoCD password
+kubectl --context k8s-dev get secret -n argocd argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d
+
+# Access ArgoCD: http://<control-plane-ip>:30443
+# Username: admin
+```
+
+## Common Operations
+
+### Cluster Management
+
+```bash
+# Check nodes
+kubectl --context k8s-dev get nodes
+kubectl --context k8s-prd get nodes
+
+# View all pods
+kubectl --context k8s-dev get pods -A
+kubectl --context k8s-prd get pods -A
+
+# SSH into nodes
+multipass shell k8s-dev-c1
+multipass shell k8s-prd-c1
+
+# Stop clusters
+multipass stop k8s-dev-c1 k8s-dev-w1 k8s-dev-w2
+multipass stop k8s-prd-c1 k8s-prd-w1 k8s-prd-w2
+
+# Delete all clusters
+cd installers
+./cleanup.sh
+```
+
+## Directory Structure
+
+```
+k8s-infrastructure/
+├── installers/
+│   ├── k8s-dev/           # DEV cluster installer (Go)
+│   │   ├── main.go
+│   │   └── go.mod
+│   ├── k8s-prd/           # PROD cluster installer (Rust)
+│   │   ├── src/main.rs
+│   │   ├── Cargo.toml
+│   │   └── Cargo.lock
+│   ├── install-dev.sh
+│   ├── install-prd.sh
+│   └── cleanup.sh
+├── argocd/                # ArgoCD configurations
+└── README.md
+```
+
+## Troubleshooting
+
+### Clean up and retry
+
+```bash
+cd installers
+./cleanup.sh
+./install-dev.sh  # or ./install-prd.sh
+```
+
+### Check component status
+
+```bash
+# Check Calico
+kubectl get pods -n calico-system
+
+# Check monitoring
+kubectl get pods -n monitoring
+
+# Check ArgoCD (DEV)
+kubectl --context k8s-dev get pods -n argocd
+```
