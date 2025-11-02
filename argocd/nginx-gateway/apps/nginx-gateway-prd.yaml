@@ -9,7 +9,7 @@ spec:
   project: default
   source:
     chart: nginx-gateway-fabric
-    repoURL: oci://ghcr.io/nginxinc/charts
+    repoURL: oci://ghcr.io/nginx/charts
     targetRevision: 1.6.0
     helm:
       values: |
