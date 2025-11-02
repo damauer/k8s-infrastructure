@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"k8s-infrastructure/pkg/addons"
 	"k8s-infrastructure/pkg/binaries"
+	"k8s-infrastructure/pkg/cloudinit"
 	"k8s-infrastructure/pkg/config"
 	"k8s-infrastructure/pkg/images"
 	"k8s-infrastructure/pkg/network"
@@ -124,6 +127,25 @@ func handleCreate() {
 		}
 	}
 
+	// Multipass requires integer CPU values, convert millicores to whole CPUs
+	if cli.platform.DeployMethod == "multipass" {
+		// Parse and round up fractional CPUs for control plane
+		cpCPU, err := resources.ParseCPU(rec.ControlPlaneCPU)
+		if err == nil && cpCPU < 1 {
+			rec.ControlPlaneCPU = "1"
+		} else if err == nil && cpCPU != float64(int(cpCPU)) {
+			rec.ControlPlaneCPU = fmt.Sprintf("%d", int(cpCPU)+1)
+		}
+
+		// Parse and round up fractional CPUs for workers
+		workerCPU, err := resources.ParseCPU(finalCPUs)
+		if err == nil && workerCPU < 1 {
+			finalCPUs = "1"
+		} else if err == nil && workerCPU != float64(int(workerCPU)) {
+			finalCPUs = fmt.Sprintf("%d", int(workerCPU)+1)
+		}
+	}
+
 	// Validate resources against platform limits
 	totalNodes := finalNodes + 1 // workers + control plane
 	if err := calc.ValidateResources(finalCPUs, finalMemory, totalNodes); err != nil {
@@ -177,27 +199,81 @@ func handleCreate() {
 		CNIVersion:  *cniVersion,
 	}
 
+	// Generate cloud-init configs
+	k8sMajorMinor := strings.Join(strings.Split(*k8sVersion, ".")[:2], ".")
+	ciConfig := cloudinit.Config{
+		K8sVersion:  k8sMajorMinor,
+		PodCIDR:     netConfig.PodCIDR,
+		ServiceCIDR: netConfig.ServiceCIDR,
+	}
+
+	// Generate control plane cloud-init
+	ciConfig.Role = "control-plane"
+	controlPlaneInit, err := cloudinit.GenerateControlPlaneConfig(ciConfig)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to generate control plane cloud-init: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Write control plane cloud-init to temp file
+	controlPlaneTmpFile, err := os.CreateTemp("", "k8s-cp-init-*.yaml")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to create temp file: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.Remove(controlPlaneTmpFile.Name())
+
+	if _, err := controlPlaneTmpFile.WriteString(controlPlaneInit); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to write cloud-init: %v\n", err)
+		os.Exit(1)
+	}
+	controlPlaneTmpFile.Close()
+
+	// Generate worker cloud-init
+	ciConfig.Role = "worker"
+	workerInit, err := cloudinit.GenerateWorkerConfig(ciConfig)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to generate worker cloud-init: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Write worker cloud-init to temp file
+	workerTmpFile, err := os.CreateTemp("", "k8s-worker-init-*.yaml")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to create temp file: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.Remove(workerTmpFile.Name())
+
+	if _, err := workerTmpFile.WriteString(workerInit); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to write cloud-init: %v\n", err)
+		os.Exit(1)
+	}
+	workerTmpFile.Close()
+
 	// Add control plane node
 	clusterConfig.Nodes = append(clusterConfig.Nodes, provider.NodeConfig{
-		Name:        fmt.Sprintf("k8s-%s-control-plane", *env),
-		Role:        "control-plane",
-		CPUs:        rec.ControlPlaneCPU,
-		Memory:      rec.ControlPlaneMemory,
-		Disk:        rec.ControlPlaneDisk,
-		Environment: *env,
-		KubeVersion: fmt.Sprintf("v%s", *k8sVersion),
+		Name:          fmt.Sprintf("k8s-%s-c1", *env),
+		Role:          "control-plane",
+		CPUs:          rec.ControlPlaneCPU,
+		Memory:        rec.ControlPlaneMemory,
+		Disk:          rec.ControlPlaneDisk,
+		Environment:   *env,
+		KubeVersion:   fmt.Sprintf("v%s", *k8sVersion),
+		CloudInitPath: controlPlaneTmpFile.Name(),
 	})
 
 	// Add worker nodes
 	for i := 0; i < finalNodes; i++ {
 		clusterConfig.Nodes = append(clusterConfig.Nodes, provider.NodeConfig{
-			Name:        fmt.Sprintf("k8s-%s-worker-%d", *env, i+1),
-			Role:        "worker",
-			CPUs:        finalCPUs,
-			Memory:      finalMemory,
-			Disk:        finalDisk,
-			Environment: *env,
-			KubeVersion: fmt.Sprintf("v%s", *k8sVersion),
+			Name:          fmt.Sprintf("k8s-%s-w%d", *env, i+1),
+			Role:          "worker",
+			CPUs:          finalCPUs,
+			Memory:        finalMemory,
+			Disk:          finalDisk,
+			Environment:   *env,
+			KubeVersion:   fmt.Sprintf("v%s", *k8sVersion),
+			CloudInitPath: workerTmpFile.Name(),
 		})
 	}
 
@@ -224,7 +300,40 @@ func handleCreate() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("\n✅ Cluster created successfully!\n")
+	fmt.Printf("\n✅ Cluster created successfully!\n\n")
+
+	// Install add-ons
+	controlPlaneName := fmt.Sprintf("k8s-%s-c1", *env)
+	addonMgr := addons.NewAddonManager(cli.provider.Name(), controlPlaneName)
+
+	if err := addonMgr.InstallAll(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to install add-ons: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Get control plane IP for displaying URLs
+	controlPlaneStatus, err := cli.provider.GetNodeStatus(ctx, controlPlaneName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  Warning: Could not get control plane IP: %v\n", err)
+	} else {
+		// Get access information
+		accessInfo, err := addonMgr.GetAccessInfo(ctx, controlPlaneStatus.IP)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Warning: Could not get access information: %v\n", err)
+		} else {
+			// Display access information
+			fmt.Printf("\n📊 Monitoring & GitOps:\n")
+			fmt.Printf("  • Grafana:     %s\n", accessInfo["grafana_url"])
+			fmt.Printf("    Username:    %s\n", accessInfo["grafana_username"])
+			fmt.Printf("    Password:    %s\n", accessInfo["grafana_password"])
+			fmt.Printf("\n  • Prometheus:  %s\n", accessInfo["prometheus_url"])
+			fmt.Printf("\n  • ArgoCD:      %s (HTTPS: %s)\n", accessInfo["argocd_url_http"], accessInfo["argocd_url_https"])
+			fmt.Printf("    Username:    %s\n", accessInfo["argocd_username"])
+			fmt.Printf("    Password:    %s\n", accessInfo["argocd_password"])
+		}
+	}
+
+	fmt.Printf("\n✅ All components installed successfully!\n")
 	fmt.Printf("\nNext steps:\n")
 	fmt.Printf("  • View cluster status: k8s-deploy status --env %s\n", *env)
 	fmt.Printf("  • List all nodes: k8s-deploy list\n")

@@ -74,9 +74,16 @@ func (p *MultipassProvider) CreateNode(ctx context.Context, config provider.Node
 		args = append(args, p.ubuntuRelease)
 	}
 
-	// Add network for WSL2
-	if p.network != "" {
-		args = append(args, "--network", p.network)
+	// Add network (en0 for macOS, or custom from config)
+	network := p.network
+	if network == "" {
+		network = "en0" // Default to en0 for macOS
+	}
+	args = append(args, "--network", network)
+
+	// Add cloud-init if provided
+	if config.CloudInitPath != "" {
+		args = append(args, "--cloud-init", config.CloudInitPath)
 	}
 
 	cmd := exec.CommandContext(ctx, "multipass", args...)

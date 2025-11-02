@@ -14,6 +14,7 @@ type NodeConfig struct {
 	Platform     string
 	Environment  string
 	KubeVersion  string
+	CloudInitPath string // Path to cloud-init config file (optional)
 }
 
 // ClusterConfig represents the configuration for an entire cluster
