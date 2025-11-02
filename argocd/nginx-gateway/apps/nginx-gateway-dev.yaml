@@ -1,0 +1,37 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nginx-gateway-dev
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    chart: nginx-gateway-fabric
+    repoURL: oci://ghcr.io/nginxinc/charts
+    targetRevision: 1.6.0
+    helm:
+      values: |
+        service:
+          type: NodePort
+          ports:
+          - name: http
+            port: 80
+            protocol: TCP
+            targetPort: 80
+            nodePort: 30080
+          - name: https
+            port: 443
+            protocol: TCP
+            targetPort: 443
+            nodePort: 30443
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: nginx-gateway
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

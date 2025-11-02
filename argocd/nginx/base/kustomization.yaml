@@ -5,6 +5,8 @@ resources:
   - namespace.yaml
   - deployment.yaml
   - service.yaml
+  - gateway/gateway.yaml
+  - gateway/httproute.yaml
 
 commonLabels:
   managed-by: kustomize
