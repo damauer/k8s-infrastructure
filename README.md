@@ -16,13 +16,14 @@ Cross-platform Kubernetes cluster deployment tool supporting:
 
 ## Quick Start
 
-### Current Status (Phase 4 Complete)
+### Current Status (Phase 6 Complete)
 
 ✅ Configuration system
 ✅ Platform detection
 ✅ Deployment abstraction layer
 ✅ Image & binary management
 ✅ Platform-specific networking
+✅ Unified CLI tool
 
 ### Prerequisites
 
@@ -39,6 +40,50 @@ Cross-platform Kubernetes cluster deployment tool supporting:
 **Raspberry Pi 5:**
 - Ubuntu 24.04 LTS
 - SSH access
+
+### CLI Tool
+
+Build the CLI tool:
+```bash
+go build -o bin/k8s-deploy ./cmd/k8s-deploy/
+```
+
+**Basic Usage:**
+```bash
+# Create a dev cluster (auto-detects platform)
+./bin/k8s-deploy create --env dev
+
+# Create a production cluster with custom settings
+./bin/k8s-deploy create --env prd --nodes 5 --cpus 4 --memory 4G
+
+# List all nodes
+./bin/k8s-deploy list
+
+# Check cluster status
+./bin/k8s-deploy status --env dev
+
+# Destroy a cluster
+./bin/k8s-deploy destroy --env dev
+```
+
+**Available Commands:**
+- `create` - Create a new Kubernetes cluster
+- `destroy` - Destroy an existing cluster
+- `list` - List all nodes across clusters
+- `status` - Show cluster status and health
+- `version` - Show version information
+- `help` - Show help message
+
+**Create Flags:**
+- `--env` - Environment (dev, prd) [default: dev]
+- `--platform` - Platform override [default: auto]
+- `--k8s-version` - Kubernetes version [default: 1.30.0]
+- `--cni` - CNI type (calico, flannel) [default: calico]
+- `--cni-version` - CNI version [default: 3.28.0]
+- `--nodes` - Number of worker nodes [default: 3]
+- `--cpus` - CPUs per node [default: 2]
+- `--memory` - Memory per node [default: 2G]
+- `--disk` - Disk per node [default: 20G]
 
 ### Configuration
 
@@ -74,6 +119,8 @@ k8s-infrastructure/
 ├── argocd/                 # ArgoCD applications & manifests
 │   ├── nginx/              # Example nginx deployment
 │   └── nginx-gateway/      # Gateway API fabric
+├── cmd/                    # Command-line tools
+│   └── k8s-deploy/         # Main CLI tool
 ├── config/                 # Platform configurations
 │   ├── platform-config.yaml
 │   └── cluster-inventory.yaml
@@ -82,6 +129,7 @@ k8s-infrastructure/
 │   └── k8s-prd/
 └── pkg/                    # Go packages
     ├── binaries/           # Binary management
+    ├── config/             # Configuration loading
     ├── images/             # Container image management
     ├── network/            # Network configuration
     ├── platform/           # Platform detection
@@ -118,7 +166,7 @@ go test ./...
 - [x] Phase 3: Image & Binary Management
 - [x] Phase 4: Platform-Specific Networking
 - [ ] Phase 5: Resource Optimization
-- [ ] Phase 6: Unified CLI Tool
+- [x] Phase 6: Unified CLI Tool
 - [ ] Phase 7: Testing & CI/CD
 - [ ] Phase 8: Documentation
 
