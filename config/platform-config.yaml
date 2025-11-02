@@ -1,0 +1,90 @@
+# Platform-specific configuration for Kubernetes deployment
+# Supports: macOS (M2), WSL2 (Windows 11), Raspberry Pi 5
+
+platforms:
+  # macOS M2 MacBook Pro
+  darwin-arm64:
+    deployment_method: multipass
+    default_cpus: "2"
+    default_memory: "4G"
+    default_disk: "20G"
+    vm_driver: qemu
+    ubuntu_release: noble  # Ubuntu 24.04 LTS
+
+  # macOS Intel
+  darwin-amd64:
+    deployment_method: multipass
+    default_cpus: "2"
+    default_memory: "4G"
+    default_disk: "20G"
+    vm_driver: qemu
+    ubuntu_release: noble
+
+  # WSL2 on Windows 11 (AMD64)
+  linux-amd64-wsl2:
+    deployment_method: multipass
+    default_cpus: "2"
+    default_memory: "4G"
+    default_disk: "20G"
+    vm_driver: hyperv
+    ubuntu_release: noble
+    # WSL2-specific settings
+    multipass_network: Ethernet
+    multipass_path: /mnt/c/Program Files/Multipass/bin/multipass.exe
+
+  # WSL2 on Windows 11 (ARM64)
+  linux-arm64-wsl2:
+    deployment_method: multipass
+    default_cpus: "2"
+    default_memory: "4G"
+    default_disk: "20G"
+    vm_driver: hyperv
+    ubuntu_release: noble
+    multipass_network: Ethernet
+
+  # Raspberry Pi 5 (Bare Metal)
+  linux-arm64-pi:
+    deployment_method: native
+    default_cpus: "2"
+    default_memory: "3G"  # Reserve memory for OS
+    max_nodes: 5
+    ubuntu_release: noble
+    # SSH configuration for bare metal
+    ssh_user: ubuntu
+    ssh_key_path: ~/.ssh/id_rsa
+
+  # Generic Linux (fallback)
+  linux-amd64:
+    deployment_method: multipass
+    default_cpus: "2"
+    default_memory: "4G"
+    default_disk: "20G"
+    vm_driver: qemu
+    ubuntu_release: noble
+
+# Environment-specific settings
+environments:
+  dev:
+    control_planes: 1
+    workers: 2
+    pod_cidr: "10.244.0.0/16"
+    service_cidr: "10.96.0.0/12"
+    context_name: k8s-dev
+    cluster_name: k8s-dev
+
+  prd:
+    control_planes: 1
+    workers: 3
+    pod_cidr: "10.245.0.0/16"
+    service_cidr: "10.97.0.0/12"
+    context_name: k8s-prd
+    cluster_name: k8s-prd
+
+# Kubernetes versions
+kubernetes:
+  version: "1.30"
+
+# Networking
+networking:
+  cni: calico
+  calico_version: v3.28.0

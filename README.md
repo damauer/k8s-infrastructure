@@ -1,189 +1,110 @@
 # Kubernetes Infrastructure
 
-Multi-cluster Kubernetes deployment system for DEV and PROD environments using Multipass VMs.
+Cross-platform Kubernetes cluster deployment tool supporting:
+- **macOS** (M2 MacBook Pro, Intel) - Multipass VMs
+- **WSL2** (Windows 11, AMD64/ARM64) - Multipass VMs
+- **Raspberry Pi 5** (ARM64) - Bare metal
 
-## Overview
+## Features
 
-This repository provides automated installers for deploying Kubernetes clusters in DEV and PROD environments. Each cluster includes:
-
-- **Kubernetes 1.30.14** - Latest stable release
-- **Flannel CNI** - Container networking (uses quay.io, avoids Docker Hub rate limiting)
-- **kube-prometheus-stack** - Monitoring with Prometheus + Grafana
-- **Ingress NGINX** - Ingress controller
-- **ArgoCD** (DEV only) - GitOps continuous delivery with multi-cluster support
-- **Multi-cluster management** - Merged kubeconfig for easy context switching
-
-## Current Deployment
-
-- **DEV Cluster**: 192.168.2.193 (context: `k8s-dev`)
-  - 3 nodes (1 control plane + 2 workers)
-  - ArgoCD installed and configured for multi-cluster management
-  - Test application: guestbook (http://192.168.2.193:30100)
-
-- **PROD Cluster**: 192.168.2.196 (context: `k8s-prd`)
-  - 3 nodes (1 control plane + 2 workers)
-  - Registered in ArgoCD for GitOps deployments
-  - Managed remotely from DEV cluster
+- 🔍 Automatic platform detection
+- ⚙️ YAML-based configuration
+- 🚀 Multi-environment support (dev, prd)
+- 📦 GitOps-ready with ArgoCD
+- 🌐 Gateway API + Legacy Ingress support
+- 📊 Integrated monitoring (Prometheus/Grafana)
 
 ## Quick Start
 
+### Current Status (Phase 1 Complete)
+
+✅ Configuration system
+✅ Platform detection
+🚧 Deployment abstraction layer (in progress)
+
 ### Prerequisites
 
-- [Multipass](https://multipass.run/) - VM manager
-- [kubectl](https://kubernetes.io/docs/tasks/tools/) - Kubernetes CLI
-- [Go 1.21+](https://go.dev/doc/install) - For DEV cluster
-- [Rust](https://rustup.rs/) - For PROD cluster
+**All Platforms:**
+- kubectl
+- Git
 
-### Install DEV Cluster
+**macOS:**
+- Multipass
 
-```bash
-cd installers
-./install-dev.sh
+**WSL2:**
+- Multipass for Windows
+
+**Raspberry Pi 5:**
+- Ubuntu 24.04 LTS
+- SSH access
+
+### Configuration
+
+See `config/platform-config.yaml` for platform-specific settings.
+See `config/cluster-inventory.yaml` for bare metal node inventory (Pi clusters).
+
+## Platform Detection
+
+The system automatically detects your platform:
+
+```go
+import "k8s-infrastructure/pkg/platform"
+
+p, _ := platform.Detect()
+fmt.Printf("Platform: %s\n", p.String())
+// Output: darwin/arm64, deploy=multipass
 ```
 
-The DEV cluster will be deployed with these nodes:
-- `k8s-dev-c1` - Control plane
-- `k8s-dev-w1` - Worker 1
-- `k8s-dev-w2` - Worker 2
+### Supported Platforms
 
-### Install PROD Cluster
+| Platform | OS | Arch | Deploy Method |
+|----------|--------|--------|---------------|
+| macOS M2 | darwin | arm64 | multipass |
+| macOS Intel | darwin | amd64 | multipass |
+| WSL2 AMD64 | linux | amd64 | multipass |
+| WSL2 ARM64 | linux | arm64 | multipass |
+| Raspberry Pi 5 | linux | arm64 | native |
 
-```bash
-cd installers
-./install-prd.sh
-```
-
-The PROD cluster will be deployed with these nodes:
-- `k8s-prd-c1` - Control plane
-- `k8s-prd-w1` - Worker 1
-- `k8s-prd-w2` - Worker 2
-
-## Multi-Cluster Management
-
-Both clusters are automatically added to your `~/.kube/config` with distinct context names.
-
-### Switch between clusters
-
-```bash
-# Switch to DEV
-kubectl config use-context k8s-dev
-
-# Switch to PROD
-kubectl config use-context k8s-prd
-
-# View all contexts
-kubectl config get-contexts
-
-# Check current context
-kubectl config current-context
-```
-
-## Accessing Services
-
-### Monitoring (Both Clusters)
-
-```bash
-# Get Grafana password (DEV)
-kubectl --context k8s-dev get secret -n monitoring kube-prometheus-stack-grafana \
-  -o jsonpath='{.data.admin-password}' | base64 -d
-
-# Get Grafana password (PROD)
-kubectl --context k8s-prd get secret -n monitoring kube-prometheus-stack-grafana \
-  -o jsonpath='{.data.admin-password}' | base64 -d
-
-# Access Grafana: http://<control-plane-ip>:30080
-# Username: admin
-```
-
-### ArgoCD (DEV Only)
-
-ArgoCD is exposed via NodePort and configured for multi-cluster management:
-
-```bash
-# Access ArgoCD UI
-# URL: http://192.168.2.193:30443
-# Username: admin
-# Password: 278g6ptEmBm3P7o5
-
-# Get password programmatically
-kubectl --context k8s-dev get secret -n argocd argocd-initial-admin-secret \
-  -o jsonpath='{.data.password}' | base64 -d
-
-# View registered clusters
-kubectl --context k8s-dev get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster
-```
-
-**Multi-cluster Setup**: ArgoCD on the DEV cluster manages both DEV and PROD clusters. The PROD cluster is registered using a service account with cluster-admin permissions.
-
-## Common Operations
-
-### Cluster Management
-
-```bash
-# Check nodes
-kubectl --context k8s-dev get nodes
-kubectl --context k8s-prd get nodes
-
-# View all pods
-kubectl --context k8s-dev get pods -A
-kubectl --context k8s-prd get pods -A
-
-# SSH into nodes
-multipass shell k8s-dev-c1
-multipass shell k8s-prd-c1
-
-# Stop clusters
-multipass stop k8s-dev-c1 k8s-dev-w1 k8s-dev-w2
-multipass stop k8s-prd-c1 k8s-prd-w1 k8s-prd-w2
-
-# Delete all clusters
-cd installers
-./cleanup.sh
-```
-
-## Directory Structure
+## Project Structure
 
 ```
 k8s-infrastructure/
-├── installers/
-│   ├── k8s-dev/                    # DEV cluster installer (Go)
-│   │   ├── main.go
-│   │   └── go.mod
-│   ├── k8s-prd/                    # PROD cluster installer (Rust)
-│   │   ├── src/main.rs
-│   │   ├── Cargo.toml
-│   │   └── Cargo.lock
-│   ├── install-dev.sh              # DEV deployment script
-│   ├── install-prd.sh              # PROD deployment script
-│   └── cleanup.sh                  # Cleanup script
-├── argocd/                         # ArgoCD configurations
-│   ├── guestbook-app/              # Test application manifests
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   └── namespace.yaml
-│   └── guestbook-application.yaml  # ArgoCD Application definition
-└── README.md
+├── argocd/                 # ArgoCD applications & manifests
+│   ├── nginx/              # Example nginx deployment
+│   └── nginx-gateway/      # Gateway API fabric
+├── config/                 # Platform configurations
+│   ├── platform-config.yaml
+│   └── cluster-inventory.yaml
+├── installers/             # Legacy installers (being phased out)
+│   ├── k8s-dev/
+│   └── k8s-prd/
+└── pkg/                    # Go packages
+    └── platform/           # Platform detection
 ```
 
-## Troubleshooting
+## Development
 
-### Clean up and retry
+### Testing
 
 ```bash
-cd installers
-./cleanup.sh
-./install-dev.sh  # or ./install-prd.sh
+# Test platform detection
+go test ./pkg/platform/...
+
+# Run all tests
+go test ./...
 ```
 
-### Check component status
+## Roadmap
 
-```bash
-# Check Flannel CNI
-kubectl get pods -n kube-flannel
+- [x] Phase 1: Configuration & Platform Detection
+- [ ] Phase 2: Deployment Abstraction Layer
+- [ ] Phase 3: Image & Binary Management
+- [ ] Phase 4: Platform-Specific Networking
+- [ ] Phase 5: Resource Optimization
+- [ ] Phase 6: Unified CLI Tool
+- [ ] Phase 7: Testing & CI/CD
+- [ ] Phase 8: Documentation
 
-# Check monitoring
-kubectl get pods -n monitoring
+## License
 
-# Check ArgoCD (DEV)
-kubectl --context k8s-dev get pods -n argocd
-```
+MIT

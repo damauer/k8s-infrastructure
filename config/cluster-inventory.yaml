@@ -1,0 +1,64 @@
+# Physical cluster inventory for bare metal deployments
+# Used primarily for Raspberry Pi clusters
+
+clusters:
+  # Example Raspberry Pi 5 DEV cluster
+  pi-dev:
+    nodes:
+      - hostname: pi-dev-c1
+        ip: 192.168.1.101
+        role: control-plane
+        arch: arm64
+        ssh_user: ubuntu
+        ssh_port: 22
+      - hostname: pi-dev-w1
+        ip: 192.168.1.111
+        role: worker
+        arch: arm64
+        ssh_user: ubuntu
+        ssh_port: 22
+      - hostname: pi-dev-w2
+        ip: 192.168.1.112
+        role: worker
+        arch: arm64
+        ssh_user: ubuntu
+        ssh_port: 22
+    network:
+      gateway: 192.168.1.1
+      dns: [8.8.8.8, 1.1.1.1]
+
+  # Example Raspberry Pi 5 PRD cluster
+  pi-prd:
+    nodes:
+      - hostname: pi-prd-c1
+        ip: 192.168.1.201
+        role: control-plane
+        arch: arm64
+        ssh_user: ubuntu
+        ssh_port: 22
+      - hostname: pi-prd-w1
+        ip: 192.168.1.211
+        role: worker
+        arch: arm64
+        ssh_user: ubuntu
+        ssh_port: 22
+      - hostname: pi-prd-w2
+        ip: 192.168.1.212
+        role: worker
+        arch: arm64
+        ssh_user: ubuntu
+        ssh_port: 22
+      - hostname: pi-prd-w3
+        ip: 192.168.1.213
+        role: worker
+        arch: arm64
+        ssh_user: ubuntu
+        ssh_port: 22
+    network:
+      gateway: 192.168.1.1
+      dns: [8.8.8.8, 1.1.1.1]
+
+# Notes:
+# - Customize IP addresses to match your network
+# - Ensure SSH keys are configured on all nodes
+# - All nodes should have static IP assignments
