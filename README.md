@@ -6,12 +6,24 @@ Multi-cluster Kubernetes deployment system for DEV and PROD environments using M
 
 This repository provides automated installers for deploying Kubernetes clusters in DEV and PROD environments. Each cluster includes:
 
-- **Kubernetes 1.30** - Latest stable release
+- **Kubernetes 1.30.14** - Latest stable release
 - **Flannel CNI** - Container networking (uses quay.io, avoids Docker Hub rate limiting)
 - **kube-prometheus-stack** - Monitoring with Prometheus + Grafana
 - **Ingress NGINX** - Ingress controller
-- **ArgoCD** (DEV only) - GitOps continuous delivery
+- **ArgoCD** (DEV only) - GitOps continuous delivery with multi-cluster support
 - **Multi-cluster management** - Merged kubeconfig for easy context switching
+
+## Current Deployment
+
+- **DEV Cluster**: 192.168.2.193 (context: `k8s-dev`)
+  - 3 nodes (1 control plane + 2 workers)
+  - ArgoCD installed and configured for multi-cluster management
+  - Test application: guestbook (http://192.168.2.193:30100)
+
+- **PROD Cluster**: 192.168.2.196 (context: `k8s-prd`)
+  - 3 nodes (1 control plane + 2 workers)
+  - Registered in ArgoCD for GitOps deployments
+  - Managed remotely from DEV cluster
 
 ## Quick Start
 
@@ -85,14 +97,23 @@ kubectl --context k8s-prd get secret -n monitoring kube-prometheus-stack-grafana
 
 ### ArgoCD (DEV Only)
 
+ArgoCD is exposed via NodePort and configured for multi-cluster management:
+
 ```bash
-# Get ArgoCD password
+# Access ArgoCD UI
+# URL: http://192.168.2.193:30443
+# Username: admin
+# Password: 278g6ptEmBm3P7o5
+
+# Get password programmatically
 kubectl --context k8s-dev get secret -n argocd argocd-initial-admin-secret \
   -o jsonpath='{.data.password}' | base64 -d
 
-# Access ArgoCD: http://<control-plane-ip>:30443
-# Username: admin
+# View registered clusters
+kubectl --context k8s-dev get secrets -n argocd -l argocd.argoproj.io/secret-type=cluster
 ```
+
+**Multi-cluster Setup**: ArgoCD on the DEV cluster manages both DEV and PROD clusters. The PROD cluster is registered using a service account with cluster-admin permissions.
 
 ## Common Operations
 
@@ -125,17 +146,22 @@ cd installers
 ```
 k8s-infrastructure/
 ├── installers/
-│   ├── k8s-dev/           # DEV cluster installer (Go)
+│   ├── k8s-dev/                    # DEV cluster installer (Go)
 │   │   ├── main.go
 │   │   └── go.mod
-│   ├── k8s-prd/           # PROD cluster installer (Rust)
+│   ├── k8s-prd/                    # PROD cluster installer (Rust)
 │   │   ├── src/main.rs
 │   │   ├── Cargo.toml
 │   │   └── Cargo.lock
-│   ├── install-dev.sh
-│   ├── install-prd.sh
-│   └── cleanup.sh
-├── argocd/                # ArgoCD configurations
+│   ├── install-dev.sh              # DEV deployment script
+│   ├── install-prd.sh              # PROD deployment script
+│   └── cleanup.sh                  # Cleanup script
+├── argocd/                         # ArgoCD configurations
+│   ├── guestbook-app/              # Test application manifests
+│   │   ├── deployment.yaml
+│   │   ├── service.yaml
+│   │   └── namespace.yaml
+│   └── guestbook-application.yaml  # ArgoCD Application definition
 └── README.md
 ```
 

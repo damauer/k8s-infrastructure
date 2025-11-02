@@ -230,7 +230,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "k8s-installer"
+name = "k8s-prd"
 version = "0.1.0"
 dependencies = [
  "chrono",

@@ -1,7 +1,6 @@
-# Binaries
-go-installer/k8s-installer
-rust-installer/target/
-rust-installer/Cargo.lock
+# Binaries and build artifacts
+installers/k8s-dev/k8s-installer
+installers/k8s-prd/target/
 
 # Logs
 *.log
