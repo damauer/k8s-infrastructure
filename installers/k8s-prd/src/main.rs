@@ -105,8 +105,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "💾 Saving kubeconfig...".cyan().bold());
     save_kubeconfig(&config)?;
 
-    // Install CNI (Calico)
-    println!("{}", "🌐 Installing Calico CNI...".cyan().bold());
+    // Install CNI (Flannel)
+    println!("{}", "🌐 Installing Flannel CNI...".cyan().bold());
     install_calico(&config)?;
 
     // Launch worker nodes in parallel (ACCELERATED)
@@ -681,32 +681,24 @@ fn save_kubeconfig(config: &ClusterConfig) -> Result<(), Box<dyn std::error::Err
 }
 
 fn install_calico(config: &ClusterConfig) -> Result<(), Box<dyn std::error::Error>> {
-    println!("  Installing Calico CNI...");
+    // Install Flannel CNI (uses quay.io, avoids Docker Hub rate limiting)
+    println!("  Installing Flannel CNI...");
 
-    let install_script = format!(
-        r#"
-        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml
-        sleep 10
-        curl -sS -O https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/custom-resources.yaml
-        sed -i 's#cidr: 192\.168\.0\.0/16#cidr: {}#g' custom-resources.yaml
-        kubectl create -f custom-resources.yaml
-        "#,
-        config.pod_cidr
-    );
+    let install_cmd = "kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml";
 
     let output = Command::new("multipass")
-        .args(&["exec", &config.control_plane.name, "--", "bash", "-c", &install_script])
+        .args(&["exec", &config.control_plane.name, "--", "bash", "-c", install_cmd])
         .output()?;
 
     if !output.status.success() {
-        println!("Calico installation output: {}", String::from_utf8_lossy(&output.stdout));
-        return Err("Failed to install Calico".into());
+        println!("Flannel installation output: {}", String::from_utf8_lossy(&output.stdout));
+        return Err("Failed to install Flannel".into());
     }
 
-    println!("  Waiting for Calico to be ready...");
+    println!("  Waiting for Flannel to be ready...");
     thread::sleep(Duration::from_secs(30));
 
-    println!("{}", "  ✓ Calico CNI installed".green());
+    println!("{}", "  ✓ Flannel CNI installed".green());
     Ok(())
 }
 
@@ -895,7 +887,7 @@ fn display_cluster_info(config: &ClusterConfig, control_plane_ip: &str, grafana_
     println!("  • Pod Network CIDR:   {}", config.pod_cidr);
     println!("  • Ubuntu Release:     24.04 LTS (Noble Numbat)");
     println!("  • Container Runtime:  containerd");
-    println!("  • CNI Plugin:         Calico");
+    println!("  • CNI Plugin:         Flannel");
     println!("  • Monitoring:         kube-prometheus-stack");
     println!("  • Ingress:            NGINX Ingress Controller");
 
