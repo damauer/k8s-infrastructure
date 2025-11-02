@@ -13,16 +13,19 @@ Cross-platform Kubernetes cluster deployment tool supporting:
 - 📦 GitOps-ready with ArgoCD
 - 🌐 Gateway API + Legacy Ingress support
 - 📊 Integrated monitoring (Prometheus/Grafana)
+- 🎯 Intelligent resource optimization based on platform capabilities
+- 📏 Workload profiles for development, testing, and production
 
 ## Quick Start
 
-### Current Status (Phase 6 Complete)
+### Current Status (Phase 5 Complete)
 
 ✅ Configuration system
 ✅ Platform detection
 ✅ Deployment abstraction layer
 ✅ Image & binary management
 ✅ Platform-specific networking
+✅ Resource optimization
 ✅ Unified CLI tool
 
 ### Prerequisites
@@ -50,11 +53,14 @@ go build -o bin/k8s-deploy ./cmd/k8s-deploy/
 
 **Basic Usage:**
 ```bash
-# Create a dev cluster (auto-detects platform)
+# Create a dev cluster with auto-optimized resources (recommended)
 ./bin/k8s-deploy create --env dev
 
-# Create a production cluster with custom settings
-./bin/k8s-deploy create --env prd --nodes 5 --cpus 4 --memory 4G
+# Create a production cluster with optimized resources
+./bin/k8s-deploy create --env prd --profile production
+
+# Create a cluster with custom settings
+./bin/k8s-deploy create --env dev --nodes 3 --cpus 2 --memory 4G
 
 # List all nodes
 ./bin/k8s-deploy list
@@ -64,6 +70,24 @@ go build -o bin/k8s-deploy ./cmd/k8s-deploy/
 
 # Destroy a cluster
 ./bin/k8s-deploy destroy --env dev
+```
+
+**Resource Optimization:**
+
+The CLI automatically calculates optimal resource allocations based on:
+- Platform capabilities (CPU, memory, max nodes)
+- Workload profile (development, testing, production)
+- Available system resources after OS reservation
+
+```bash
+# Let the tool optimize everything (recommended)
+./bin/k8s-deploy create --env dev
+
+# Use production profile for larger allocations
+./bin/k8s-deploy create --env prd --profile production
+
+# Override specific resources
+./bin/k8s-deploy create --env dev --cpus 4 --memory 8G
 ```
 
 **Available Commands:**
@@ -133,6 +157,7 @@ k8s-infrastructure/
     ├── images/             # Container image management
     ├── network/            # Network configuration
     ├── platform/           # Platform detection
+    ├── resources/          # Resource optimization & calculation
     └── provider/           # Deployment providers
         ├── multipass/      # Multipass VM provider
         └── native/         # Bare metal provider
@@ -155,6 +180,9 @@ go test ./pkg/images/... ./pkg/binaries/...
 # Test network configuration
 go test ./pkg/network/...
 
+# Test resource optimization
+go test ./pkg/resources/...
+
 # Run all tests
 go test ./...
 ```
@@ -165,7 +193,7 @@ go test ./...
 - [x] Phase 2: Deployment Abstraction Layer
 - [x] Phase 3: Image & Binary Management
 - [x] Phase 4: Platform-Specific Networking
-- [ ] Phase 5: Resource Optimization
+- [x] Phase 5: Resource Optimization
 - [x] Phase 6: Unified CLI Tool
 - [ ] Phase 7: Testing & CI/CD
 - [ ] Phase 8: Documentation

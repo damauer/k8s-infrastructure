@@ -15,6 +15,7 @@ import (
 	"k8s-infrastructure/pkg/provider"
 	"k8s-infrastructure/pkg/provider/multipass"
 	"k8s-infrastructure/pkg/provider/native"
+	"k8s-infrastructure/pkg/resources"
 )
 
 const (
@@ -61,10 +62,12 @@ func handleCreate() {
 	k8sVersion := fs.String("k8s-version", "1.30.0", "Kubernetes version")
 	cniType := fs.String("cni", "calico", "CNI type (calico, flannel)")
 	cniVersion := fs.String("cni-version", "3.28.0", "CNI version")
-	nodes := fs.Int("nodes", 3, "Number of worker nodes")
-	cpus := fs.String("cpus", "2", "CPUs per node")
-	memory := fs.String("memory", "2G", "Memory per node")
-	disk := fs.String("disk", "20G", "Disk per node")
+	nodes := fs.Int("nodes", 0, "Number of worker nodes (0 for auto-calculation)")
+	cpus := fs.String("cpus", "", "CPUs per node (empty for auto-calculation)")
+	memory := fs.String("memory", "", "Memory per node (empty for auto-calculation)")
+	disk := fs.String("disk", "", "Disk per node (empty for auto-calculation)")
+	profile := fs.String("profile", "development", "Workload profile (development, testing, production)")
+	autoSize := fs.Bool("auto-size", false, "Automatically calculate optimal resource sizes")
 
 	fs.Parse(os.Args[2:])
 
@@ -74,12 +77,83 @@ func handleCreate() {
 		os.Exit(1)
 	}
 
+	// Initialize resource calculator
+	calc := resources.NewResourceCalculator(cli.platform.String())
+	caps := calc.GetPlatformCapabilities()
+
+	// Parse workload profile
+	var workloadProfile resources.WorkloadProfile
+	switch *profile {
+	case "development":
+		workloadProfile = resources.ProfileDevelopment
+	case "testing":
+		workloadProfile = resources.ProfileTesting
+	case "production":
+		workloadProfile = resources.ProfileProduction
+	default:
+		fmt.Fprintf(os.Stderr, "Invalid profile: %s. Must be development, testing, or production\n", *profile)
+		os.Exit(1)
+	}
+
+	// Get resource recommendations
+	rec, err := calc.CalculateRecommendation(workloadProfile, *nodes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to calculate resource recommendations: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Determine final resource values (use recommendations if auto-size or not specified)
+	finalCPUs := *cpus
+	finalMemory := *memory
+	finalDisk := *disk
+	finalNodes := *nodes
+
+	if *autoSize || *cpus == "" || *memory == "" || *disk == "" || *nodes == 0 {
+		// Use recommendations
+		if finalCPUs == "" {
+			finalCPUs = rec.WorkerCPU
+		}
+		if finalMemory == "" {
+			finalMemory = rec.WorkerMemory
+		}
+		if finalDisk == "" {
+			finalDisk = rec.WorkerDisk
+		}
+		if finalNodes == 0 {
+			finalNodes = rec.RecommendedWorkers
+		}
+	}
+
+	// Validate resources against platform limits
+	totalNodes := finalNodes + 1 // workers + control plane
+	if err := calc.ValidateResources(finalCPUs, finalMemory, totalNodes); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Resource validation failed: %v\n", err)
+		fmt.Printf("\n💡 Platform Capabilities (%s):\n", caps.Platform)
+		fmt.Printf("   Total CPU: %d cores (%.1f available after OS reservation)\n",
+			caps.TotalCPU, float64(caps.TotalCPU)-caps.ReservedCPU)
+		fmt.Printf("   Total Memory: %.1fGB (%.1fGB available after OS reservation)\n",
+			caps.TotalMemoryGB, caps.TotalMemoryGB-caps.ReservedMemGB)
+		fmt.Printf("   Max Nodes: %d\n", caps.MaxNodesLimit)
+		os.Exit(1)
+	}
+
 	fmt.Printf("🚀 Creating Kubernetes cluster\n")
 	fmt.Printf("   Environment: %s\n", *env)
 	fmt.Printf("   Platform: %s\n", cli.platform.String())
+	fmt.Printf("   Profile: %s\n", *profile)
 	fmt.Printf("   Kubernetes: v%s\n", *k8sVersion)
 	fmt.Printf("   CNI: %s v%s\n", *cniType, *cniVersion)
-	fmt.Printf("   Nodes: 1 control-plane + %d workers\n\n", *nodes)
+	fmt.Printf("   Nodes: 1 control-plane + %d workers\n\n", finalNodes)
+
+	fmt.Printf("📊 Resource Allocation:\n")
+	fmt.Printf("   Control Plane: %s CPU, %s Memory, %s Disk\n",
+		rec.ControlPlaneCPU, rec.ControlPlaneMemory, rec.ControlPlaneDisk)
+	fmt.Printf("   Workers: %s CPU, %s Memory, %s Disk (each)\n",
+		finalCPUs, finalMemory, finalDisk)
+	if *autoSize || *cpus == "" {
+		fmt.Printf("   ℹ️  Using optimized resources for %s workload\n", *profile)
+	}
+	fmt.Println()
 
 	ctx := context.Background()
 
@@ -107,21 +181,21 @@ func handleCreate() {
 	clusterConfig.Nodes = append(clusterConfig.Nodes, provider.NodeConfig{
 		Name:        fmt.Sprintf("k8s-%s-control-plane", *env),
 		Role:        "control-plane",
-		CPUs:        *cpus,
-		Memory:      *memory,
-		Disk:        *disk,
+		CPUs:        rec.ControlPlaneCPU,
+		Memory:      rec.ControlPlaneMemory,
+		Disk:        rec.ControlPlaneDisk,
 		Environment: *env,
 		KubeVersion: fmt.Sprintf("v%s", *k8sVersion),
 	})
 
 	// Add worker nodes
-	for i := 0; i < *nodes; i++ {
+	for i := 0; i < finalNodes; i++ {
 		clusterConfig.Nodes = append(clusterConfig.Nodes, provider.NodeConfig{
 			Name:        fmt.Sprintf("k8s-%s-worker-%d", *env, i+1),
 			Role:        "worker",
-			CPUs:        *cpus,
-			Memory:      *memory,
-			Disk:        *disk,
+			CPUs:        finalCPUs,
+			Memory:      finalMemory,
+			Disk:        finalDisk,
 			Environment: *env,
 			KubeVersion: fmt.Sprintf("v%s", *k8sVersion),
 		})
@@ -390,10 +464,12 @@ Create Flags:
   --k8s-version string  Kubernetes version (default "1.30.0")
   --cni string          CNI type (calico, flannel) (default "calico")
   --cni-version string  CNI version (default "3.28.0")
-  --nodes int           Number of worker nodes (default 3)
-  --cpus string         CPUs per node (default "2")
-  --memory string       Memory per node (default "2G")
-  --disk string         Disk per node (default "20G")
+  --profile string      Workload profile: development, testing, production (default "development")
+  --nodes int           Number of worker nodes (0 for auto-calculation) (default 0)
+  --cpus string         CPUs per node (empty for auto-calculation)
+  --memory string       Memory per node (empty for auto-calculation)
+  --disk string         Disk per node (empty for auto-calculation)
+  --auto-size           Automatically calculate optimal resource sizes
 
 Destroy Flags:
   --env string          Environment to destroy (dev, prd) (default "dev")
@@ -405,11 +481,17 @@ Status Flags:
   --platform string     Platform override (default "auto")
 
 Examples:
-  # Create a dev cluster with auto-detected platform
+  # Create a dev cluster with auto-detected platform and optimized resources
   k8s-deploy create --env dev
 
-  # Create a production cluster with 5 workers
-  k8s-deploy create --env prd --nodes 5 --cpus 4 --memory 4G
+  # Create a production cluster with auto-sized resources
+  k8s-deploy create --env prd --profile production --auto-size
+
+  # Create a cluster with specific resources
+  k8s-deploy create --env dev --nodes 3 --cpus 2 --memory 4G --disk 30G
+
+  # Create a testing cluster with recommended resources for the platform
+  k8s-deploy create --env dev --profile testing
 
   # List all nodes
   k8s-deploy list
