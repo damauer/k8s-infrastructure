@@ -2,9 +2,15 @@ package multipass
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"k8s-infrastructure/pkg/provider"
 )
@@ -223,15 +229,388 @@ func (p *MultipassProvider) GetNodeIP(ctx context.Context, nodeName string) (str
 	return status.IP, nil
 }
 
-// DeployCluster creates and configures an entire cluster
-func (p *MultipassProvider) DeployCluster(ctx context.Context, config provider.ClusterConfig) error {
-	// Create all nodes
-	for _, nodeConfig := range config.Nodes {
-		if err := p.CreateNode(ctx, nodeConfig); err != nil {
-			return fmt.Errorf("failed to create node %s: %w", nodeConfig.Name, err)
+// waitForCloudInit waits for cloud-init to complete on a node
+func (p *MultipassProvider) waitForCloudInit(ctx context.Context, nodeName string) error {
+	maxAttempts := 60 // 5 minutes
+	for i := 0; i < maxAttempts; i++ {
+		cmd := exec.CommandContext(ctx, "multipass", "exec", nodeName, "--", "cloud-init", "status")
+		output, err := cmd.Output()
+
+		if err == nil {
+			status := strings.TrimSpace(string(output))
+			if strings.Contains(status, "status: done") {
+				fmt.Printf("  ✓ %s is ready\n", nodeName)
+				return nil
+			}
+		}
+
+		if i > 0 && i%10 == 0 {
+			fmt.Printf("  Waiting for cloud-init on %s... (%d/%d)\n", nodeName, i+1, maxAttempts)
+		}
+		time.Sleep(5 * time.Second)
+	}
+	return fmt.Errorf("timeout waiting for cloud-init on %s", nodeName)
+}
+
+// getNodeIPFromMultipass retrieves node IP using multipass info JSON
+func (p *MultipassProvider) getNodeIPFromMultipass(ctx context.Context, nodeName string) (string, error) {
+	cmd := exec.CommandContext(ctx, "multipass", "info", nodeName, "--format", "json")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get node info: %w", err)
+	}
+
+	var info map[string]interface{}
+	if err := json.Unmarshal(output, &info); err != nil {
+		return "", fmt.Errorf("failed to parse multipass info: %w", err)
+	}
+
+	nodeInfo, ok := info["info"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid multipass info format")
+	}
+
+	nodeData, ok := nodeInfo[nodeName].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("node %s not found in info", nodeName)
+	}
+
+	ipv4List, ok := nodeData["ipv4"].([]interface{})
+	if !ok || len(ipv4List) == 0 {
+		return "", fmt.Errorf("no IPv4 address found for %s", nodeName)
+	}
+
+	ip, ok := ipv4List[0].(string)
+	if !ok {
+		return "", fmt.Errorf("invalid IP format for %s", nodeName)
+	}
+
+	return ip, nil
+}
+
+// initializeControlPlane runs kubeadm init on the control plane
+func (p *MultipassProvider) initializeControlPlane(ctx context.Context, nodeName, podCIDR, controlPlaneIP string) (string, error) {
+	fmt.Printf("  Initializing Kubernetes control plane...\n")
+
+	initCmd := fmt.Sprintf(
+		"sudo kubeadm init --pod-network-cidr=%s --apiserver-advertise-address=%s --control-plane-endpoint=%s",
+		podCIDR, controlPlaneIP, controlPlaneIP,
+	)
+
+	cmd := exec.CommandContext(ctx, "multipass", "exec", nodeName, "--", "bash", "-c", initCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("kubeadm init failed: %w\nOutput: %s", err, string(output))
+	}
+
+	// Extract join command from output
+	joinCommand, err := p.extractJoinCommand(string(output))
+	if err != nil {
+		return "", fmt.Errorf("failed to extract join command: %w", err)
+	}
+
+	// Setup kubeconfig on control plane
+	kubeconfigSetup := `
+		mkdir -p $HOME/.kube
+		sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+		sudo chown $(id -u):$(id -g) $HOME/.kube/config
+	`
+	cmd = exec.CommandContext(ctx, "multipass", "exec", nodeName, "--", "bash", "-c", kubeconfigSetup)
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to setup kubeconfig: %w", err)
+	}
+
+	fmt.Printf("  ✓ Control plane initialized\n")
+	return joinCommand, nil
+}
+
+// extractJoinCommand extracts the kubeadm join command from kubeadm init output
+func (p *MultipassProvider) extractJoinCommand(output string) (string, error) {
+	joinRegex := regexp.MustCompile(`kubeadm join [^\n]+\n[^\n]+discovery-token-ca-cert-hash[^\n]+`)
+	joinMatches := joinRegex.FindString(output)
+
+	if joinMatches == "" {
+		return "", fmt.Errorf("join command not found in kubeadm output")
+	}
+
+	// Clean up join command
+	joinCommand := strings.ReplaceAll(joinMatches, "\\\n", "")
+	joinCommand = strings.ReplaceAll(joinCommand, "\\", "")
+	joinCommand = strings.TrimSpace(joinCommand)
+
+	return joinCommand, nil
+}
+
+// setupLocalKubeconfig retrieves and configures local kubeconfig
+func (p *MultipassProvider) setupLocalKubeconfig(ctx context.Context, controlPlane, clusterName, contextName, controlPlaneIP string) error {
+	fmt.Printf("  Setting up local kubeconfig...\n")
+
+	// Retrieve kubeconfig from control plane
+	cmd := exec.CommandContext(ctx, "multipass", "exec", controlPlane, "--", "sudo", "cat", "/etc/kubernetes/admin.conf")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to retrieve kubeconfig: %w", err)
+	}
+
+	kubeconfig := string(output)
+
+	// Replace server address with control plane IP
+	serverRegex := regexp.MustCompile(`server: https://[^:]+:`)
+	kubeconfig = serverRegex.ReplaceAllString(kubeconfig, fmt.Sprintf("server: https://%s:", controlPlaneIP))
+
+	// Replace cluster name
+	kubeconfig = strings.ReplaceAll(kubeconfig, "name: kubernetes", fmt.Sprintf("name: %s", clusterName))
+	kubeconfig = strings.ReplaceAll(kubeconfig, "cluster: kubernetes", fmt.Sprintf("cluster: %s", clusterName))
+
+	// Replace context name
+	kubeconfig = strings.ReplaceAll(kubeconfig, "name: kubernetes-admin@kubernetes", fmt.Sprintf("name: %s", contextName))
+	kubeconfig = strings.ReplaceAll(kubeconfig, "context: kubernetes-admin@kubernetes", fmt.Sprintf("context: %s", contextName))
+	kubeconfig = strings.ReplaceAll(kubeconfig, "current-context: kubernetes-admin@kubernetes", fmt.Sprintf("current-context: %s", contextName))
+
+	// Write to temp file
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	kubeconfigPath := filepath.Join(homeDir, ".kube", "config")
+	tempKubeconfigPath := filepath.Join(homeDir, ".kube", fmt.Sprintf("config-%s", clusterName))
+
+	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0755); err != nil {
+		return fmt.Errorf("failed to create .kube directory: %w", err)
+	}
+
+	if err := os.WriteFile(tempKubeconfigPath, []byte(kubeconfig), 0600); err != nil {
+		return fmt.Errorf("failed to write kubeconfig: %w", err)
+	}
+
+	// Merge with existing kubeconfig if it exists
+	if _, err := os.Stat(kubeconfigPath); err == nil {
+		// Backup existing kubeconfig
+		backupPath := kubeconfigPath + ".backup." + time.Now().Format("20060102-150405")
+		exec.Command("cp", kubeconfigPath, backupPath).Run()
+
+		// Merge kubeconfigs
+		mergeCmd := exec.Command("bash", "-c",
+			fmt.Sprintf("KUBECONFIG=%s:%s kubectl config view --flatten > %s.merged && mv %s.merged %s",
+				kubeconfigPath, tempKubeconfigPath, kubeconfigPath, kubeconfigPath, kubeconfigPath))
+		if err := mergeCmd.Run(); err != nil {
+			// If merge fails, just copy the new one
+			exec.Command("cp", tempKubeconfigPath, kubeconfigPath).Run()
+		}
+
+		// Clean up temp file
+		os.Remove(tempKubeconfigPath)
+	} else {
+		// No existing kubeconfig, just rename temp file
+		if err := os.Rename(tempKubeconfigPath, kubeconfigPath); err != nil {
+			return fmt.Errorf("failed to save kubeconfig: %w", err)
 		}
 	}
 
+	// Set current context
+	setContextCmd := exec.Command("kubectl", "config", "use-context", contextName)
+	if err := setContextCmd.Run(); err != nil {
+		fmt.Printf("  ⚠️  Warning: failed to set context: %v\n", err)
+	}
+
+	fmt.Printf("  ✓ Kubeconfig configured for context: %s\n", contextName)
+	return nil
+}
+
+// installCNI installs the CNI network plugin
+func (p *MultipassProvider) installCNI(ctx context.Context, controlPlane, cniType, cniVersion string) error {
+	fmt.Printf("  Installing %s CNI...\n", cniType)
+
+	var installCmd string
+	switch strings.ToLower(cniType) {
+	case "flannel":
+		installCmd = "kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml"
+	case "calico":
+		installCmd = fmt.Sprintf("kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v%s/manifests/tigera-operator.yaml && "+
+			"kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v%s/manifests/custom-resources.yaml", cniVersion, cniVersion)
+	default:
+		return fmt.Errorf("unsupported CNI type: %s", cniType)
+	}
+
+	cmd := exec.CommandContext(ctx, "multipass", "exec", controlPlane, "--", "bash", "-c", installCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to install %s: %w\nOutput: %s", cniType, err, string(output))
+	}
+
+	// Wait for CNI to be ready
+	fmt.Printf("  Waiting for %s to be ready...\n", cniType)
+	time.Sleep(30 * time.Second)
+
+	fmt.Printf("  ✓ %s installed\n", cniType)
+	return nil
+}
+
+// joinWorker joins a worker node to the cluster
+func (p *MultipassProvider) joinWorker(ctx context.Context, workerName, joinCommand string) error {
+	cmd := exec.CommandContext(ctx, "multipass", "exec", workerName, "--", "sudo", "bash", "-c", joinCommand)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to join worker %s: %w\nOutput: %s", workerName, err, string(output))
+	}
+
+	fmt.Printf("  ✓ %s joined successfully\n", workerName)
+	return nil
+}
+
+// waitForNodeReady waits for a node to become Ready in Kubernetes
+func (p *MultipassProvider) waitForNodeReady(ctx context.Context, controlPlane, nodeName string, timeout time.Duration) error {
+	start := time.Now()
+
+	for {
+		cmd := exec.CommandContext(ctx, "multipass", "exec", controlPlane, "--",
+			"kubectl", "get", "node", nodeName,
+			"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+		output, err := cmd.Output()
+
+		if err == nil && strings.TrimSpace(string(output)) == "True" {
+			return nil
+		}
+
+		if time.Since(start) > timeout {
+			return fmt.Errorf("timeout waiting for node %s to be ready", nodeName)
+		}
+
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// DeployCluster creates and configures an entire cluster
+func (p *MultipassProvider) DeployCluster(ctx context.Context, config provider.ClusterConfig) error {
+	// Separate control plane and worker nodes
+	var controlPlaneNode provider.NodeConfig
+	var workerNodes []provider.NodeConfig
+
+	for _, node := range config.Nodes {
+		if node.Role == "control-plane" {
+			controlPlaneNode = node
+		} else {
+			workerNodes = append(workerNodes, node)
+		}
+	}
+
+	if controlPlaneNode.Name == "" {
+		return fmt.Errorf("no control plane node found in cluster config")
+	}
+
+	// Step 1: Create control plane node
+	fmt.Printf("Creating control plane: %s\n", controlPlaneNode.Name)
+	if err := p.CreateNode(ctx, controlPlaneNode); err != nil {
+		return fmt.Errorf("failed to create control plane: %w", err)
+	}
+
+	// Step 2: Wait for control plane cloud-init
+	fmt.Printf("Waiting for control plane initialization...\n")
+	if err := p.waitForCloudInit(ctx, controlPlaneNode.Name); err != nil {
+		return err
+	}
+
+	// Step 3: Get control plane IP
+	controlPlaneIP, err := p.getNodeIPFromMultipass(ctx, controlPlaneNode.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get control plane IP: %w", err)
+	}
+	fmt.Printf("Control plane IP: %s\n", controlPlaneIP)
+
+	// Step 4: Initialize Kubernetes on control plane
+	joinCommand, err := p.initializeControlPlane(ctx, controlPlaneNode.Name, config.PodCIDR, controlPlaneIP)
+	if err != nil {
+		return err
+	}
+
+	// Step 5: Setup local kubeconfig
+	if err := p.setupLocalKubeconfig(ctx, controlPlaneNode.Name, config.Name, config.Name, controlPlaneIP); err != nil {
+		return err
+	}
+
+	// Step 6: Install CNI
+	if err := p.installCNI(ctx, controlPlaneNode.Name, config.CNI, config.CNIVersion); err != nil {
+		return err
+	}
+
+	// Step 7: Create worker nodes in parallel
+	if len(workerNodes) > 0 {
+		fmt.Printf("Creating worker nodes...\n")
+		var wg sync.WaitGroup
+		errChan := make(chan error, len(workerNodes))
+
+		for _, worker := range workerNodes {
+			wg.Add(1)
+			go func(w provider.NodeConfig) {
+				defer wg.Done()
+				fmt.Printf("  Creating %s\n", w.Name)
+				if err := p.CreateNode(ctx, w); err != nil {
+					errChan <- fmt.Errorf("failed to create worker %s: %w", w.Name, err)
+				}
+			}(worker)
+		}
+
+		wg.Wait()
+		close(errChan)
+
+		for err := range errChan {
+			return err
+		}
+
+		// Step 8: Wait for worker cloud-init in parallel
+		fmt.Printf("Waiting for workers to initialize...\n")
+		errChan = make(chan error, len(workerNodes))
+
+		for _, worker := range workerNodes {
+			wg.Add(1)
+			go func(w provider.NodeConfig) {
+				defer wg.Done()
+				if err := p.waitForCloudInit(ctx, w.Name); err != nil {
+					errChan <- err
+				}
+			}(worker)
+		}
+
+		wg.Wait()
+		close(errChan)
+
+		for err := range errChan {
+			return err
+		}
+
+		// Step 9: Join workers in parallel
+		fmt.Printf("Joining workers to cluster...\n")
+		errChan = make(chan error, len(workerNodes))
+
+		for _, worker := range workerNodes {
+			wg.Add(1)
+			go func(w provider.NodeConfig) {
+				defer wg.Done()
+				if err := p.joinWorker(ctx, w.Name, joinCommand); err != nil {
+					errChan <- err
+				}
+			}(worker)
+		}
+
+		wg.Wait()
+		close(errChan)
+
+		for err := range errChan {
+			return err
+		}
+
+		// Step 10: Wait for all nodes to be Ready
+		fmt.Printf("Waiting for all nodes to be ready...\n")
+		for _, worker := range workerNodes {
+			if err := p.waitForNodeReady(ctx, controlPlaneNode.Name, worker.Name, 5*time.Minute); err != nil {
+				return err
+			}
+			fmt.Printf("  ✓ %s is ready\n", worker.Name)
+		}
+	}
+
+	fmt.Printf("✓ Cluster deployment complete\n")
 	return nil
 }
 
