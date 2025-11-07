@@ -34,7 +34,9 @@ func NewAddonManager(provider, controlPlane string) *AddonManager {
 func (m *AddonManager) execCommand(ctx context.Context, command string) error {
 	var cmd *exec.Cmd
 	if m.provider == "multipass" {
-		cmd = exec.CommandContext(ctx, "multipass", "exec", m.controlPlane, "--", "bash", "-c", command)
+		// Set KUBECONFIG for kubectl to work properly
+		wrappedCmd := fmt.Sprintf("export KUBECONFIG=/etc/kubernetes/admin.conf; %s", command)
+		cmd = exec.CommandContext(ctx, "multipass", "exec", m.controlPlane, "--", "bash", "-c", wrappedCmd)
 	} else {
 		cmd = exec.CommandContext(ctx, "bash", "-c", command)
 	}
@@ -49,7 +51,9 @@ func (m *AddonManager) execCommand(ctx context.Context, command string) error {
 func (m *AddonManager) execCommandOutput(ctx context.Context, command string) (string, error) {
 	var cmd *exec.Cmd
 	if m.provider == "multipass" {
-		cmd = exec.CommandContext(ctx, "multipass", "exec", m.controlPlane, "--", "bash", "-c", command)
+		// Set KUBECONFIG for kubectl to work properly
+		wrappedCmd := fmt.Sprintf("export KUBECONFIG=/etc/kubernetes/admin.conf; %s", command)
+		cmd = exec.CommandContext(ctx, "multipass", "exec", m.controlPlane, "--", "bash", "-c", wrappedCmd)
 	} else {
 		cmd = exec.CommandContext(ctx, "bash", "-c", command)
 	}

@@ -773,6 +773,15 @@ func installMetricsServer(controlPlaneName string) error {
 		return fmt.Errorf("failed to install metrics-server: %w\nOutput: %s", err, string(output))
 	}
 
+	// Patch metrics-server deployment to add --kubelet-insecure-tls flag for dev environments
+	log.Println("  Patching metrics-server for insecure TLS (dev environment)...")
+	patchCmd := `kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'`
+	cmd = exec.Command("multipass", "exec", controlPlaneName, "--", "bash", "-c", patchCmd)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to patch metrics-server: %w\nOutput: %s", err, string(output))
+	}
+
 	// Wait for metrics-server to be ready (reduced timeout)
 	log.Println("  Waiting for metrics-server to be ready...")
 	waitCmd := `kubectl wait --for=condition=ready pod -l k8s-app=metrics-server -n kube-system --timeout=120s || true`
@@ -792,7 +801,9 @@ func installHelm(controlPlaneName string) error {
 		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 	`
 	cmd := exec.Command("multipass", "exec", controlPlaneName, "--", "bash", "-c", installScript)
-	if err := cmd.Run(); err != nil {
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("Helm installation output: %s\n", string(output))
 		return fmt.Errorf("failed to install Helm: %w", err)
 	}
 
@@ -809,7 +820,7 @@ func installKubePrometheusStack(controlPlaneName string) error {
 			--namespace monitoring \
 			--create-namespace \
 			--set prometheus.prometheusSpec.retention=7d \
-			--set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=10Gi
+			--set prometheus.prometheusSpec.storageSpec=null
 	`
 	cmd := exec.Command("multipass", "exec", controlPlaneName, "--", "bash", "-c", installScript)
 	output, err := cmd.CombinedOutput()
