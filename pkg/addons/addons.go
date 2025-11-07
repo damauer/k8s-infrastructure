@@ -34,8 +34,8 @@ func NewAddonManager(provider, controlPlane string) *AddonManager {
 func (m *AddonManager) execCommand(ctx context.Context, command string) error {
 	var cmd *exec.Cmd
 	if m.provider == "multipass" {
-		// Set KUBECONFIG for kubectl to work properly
-		wrappedCmd := fmt.Sprintf("export KUBECONFIG=/etc/kubernetes/admin.conf; %s", command)
+		// Use the kubeconfig from user's home directory (set up during cluster init)
+		wrappedCmd := fmt.Sprintf("export KUBECONFIG=$HOME/.kube/config; %s", command)
 		cmd = exec.CommandContext(ctx, "multipass", "exec", m.controlPlane, "--", "bash", "-c", wrappedCmd)
 	} else {
 		cmd = exec.CommandContext(ctx, "bash", "-c", command)
@@ -51,8 +51,8 @@ func (m *AddonManager) execCommand(ctx context.Context, command string) error {
 func (m *AddonManager) execCommandOutput(ctx context.Context, command string) (string, error) {
 	var cmd *exec.Cmd
 	if m.provider == "multipass" {
-		// Set KUBECONFIG for kubectl to work properly
-		wrappedCmd := fmt.Sprintf("export KUBECONFIG=/etc/kubernetes/admin.conf; %s", command)
+		// Use the kubeconfig from user's home directory (set up during cluster init)
+		wrappedCmd := fmt.Sprintf("export KUBECONFIG=$HOME/.kube/config; %s", command)
 		cmd = exec.CommandContext(ctx, "multipass", "exec", m.controlPlane, "--", "bash", "-c", wrappedCmd)
 	} else {
 		cmd = exec.CommandContext(ctx, "bash", "-c", command)
@@ -69,6 +69,12 @@ func (m *AddonManager) InstallMetricsServer(ctx context.Context) error {
 	installCmd := `kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`
 	if err := m.execCommand(ctx, installCmd); err != nil {
 		return fmt.Errorf("failed to install metrics-server: %w", err)
+	}
+
+	// Patch metrics-server deployment to add --kubelet-insecure-tls flag for dev environments
+	patchCmd := `kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'`
+	if err := m.execCommand(ctx, patchCmd); err != nil {
+		return fmt.Errorf("failed to patch metrics-server: %w", err)
 	}
 
 	// Wait for metrics-server to be ready
@@ -114,7 +120,7 @@ func (m *AddonManager) InstallPrometheusStack(ctx context.Context) error {
 			--namespace monitoring \
 			--create-namespace \
 			--set prometheus.prometheusSpec.retention=7d \
-			--set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=10Gi
+			--set prometheus.prometheusSpec.storageSpec=null
 	`
 	if err := m.execCommand(ctx, installScript); err != nil {
 		return fmt.Errorf("failed to install kube-prometheus-stack: %w", err)
