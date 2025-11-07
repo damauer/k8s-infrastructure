@@ -190,7 +190,7 @@ func handleCreate() {
 
 	// Create cluster configuration
 	clusterConfig := provider.ClusterConfig{
-		Name:        fmt.Sprintf("k8s-%s", *env),
+		Name:        fmt.Sprintf("k8sv1-%s", *env),
 		Environment: *env,
 		Nodes:       []provider.NodeConfig{},
 		PodCIDR:     netConfig.PodCIDR,
@@ -253,7 +253,7 @@ func handleCreate() {
 
 	// Add control plane node
 	clusterConfig.Nodes = append(clusterConfig.Nodes, provider.NodeConfig{
-		Name:          fmt.Sprintf("k8s-%s-c1", *env),
+		Name:          fmt.Sprintf("k8sv1-%s-c1", *env),
 		Role:          "control-plane",
 		CPUs:          rec.ControlPlaneCPU,
 		Memory:        rec.ControlPlaneMemory,
@@ -266,7 +266,7 @@ func handleCreate() {
 	// Add worker nodes
 	for i := 0; i < finalNodes; i++ {
 		clusterConfig.Nodes = append(clusterConfig.Nodes, provider.NodeConfig{
-			Name:          fmt.Sprintf("k8s-%s-w%d", *env, i+1),
+			Name:          fmt.Sprintf("k8sv1-%s-w%d", *env, i+1),
 			Role:          "worker",
 			CPUs:          finalCPUs,
 			Memory:        finalMemory,
@@ -303,7 +303,7 @@ func handleCreate() {
 	fmt.Printf("\n✅ Cluster created successfully!\n\n")
 
 	// Install add-ons
-	controlPlaneName := fmt.Sprintf("k8s-%s-c1", *env)
+	controlPlaneName := fmt.Sprintf("k8sv1-%s-c1", *env)
 	addonMgr := addons.NewAddonManager(cli.provider.Name(), controlPlaneName)
 
 	if err := addonMgr.InstallAll(ctx); err != nil {
@@ -365,7 +365,7 @@ func handleDestroy() {
 	}
 
 	ctx := context.Background()
-	clusterName := fmt.Sprintf("k8s-%s", *env)
+	clusterName := fmt.Sprintf("k8sv1-%s", *env)
 
 	fmt.Printf("🗑️  Destroying cluster: %s\n", clusterName)
 
@@ -433,7 +433,7 @@ func handleStatus() {
 	}
 
 	ctx := context.Background()
-	clusterName := fmt.Sprintf("k8s-%s", *env)
+	clusterName := fmt.Sprintf("k8sv1-%s", *env)
 
 	fmt.Printf("🔍 Cluster Status: %s\n\n", clusterName)
 

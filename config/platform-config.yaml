@@ -69,8 +69,8 @@ environments:
     workers: 2
     pod_cidr: "10.244.0.0/16"
     service_cidr: "10.96.0.0/12"
-    context_name: k8s-dev
-    cluster_name: k8s-dev
+    context_name: k8sv1-dev
+    cluster_name: k8sv1-dev
 
   prd:
     control_planes: 1
