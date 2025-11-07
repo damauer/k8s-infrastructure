@@ -12,15 +12,16 @@ use crossbeam::thread as crossbeam_thread;
 
 // Constants
 const K8S_VERSION: &str = "1.30";
-const POD_NETWORK_CIDR: &str = "10.244.0.0/16";
+const POD_NETWORK_CIDR: &str = "10.245.0.0/16";  // Different from dev (10.244.0.0/16)
+const SERVICE_CIDR: &str = "10.97.0.0/12";  // Different from dev (10.96.0.0/12)
 const DEFAULT_CPUS: &str = "2";
 const DEFAULT_MEMORY: &str = "4G";
-const DEFAULT_DISK: &str = "20G";
+const DEFAULT_DISK: &str = "30G";  // Larger disk for production
 const UBUNTU_RELEASE: &str = "noble"; // Ubuntu 24.04 LTS Noble Numbat
-const CONTROL_PLANE_NAME: &str = "k8s-prd-c1";
-const WORKER_PREFIX: &str = "k8s-prd-w";
-const CONTEXT_NAME: &str = "k8s-prd";
-const CLUSTER_NAME: &str = "k8s-prd";
+const CONTROL_PLANE_NAME: &str = "k8sv1-prd-c1";
+const WORKER_PREFIX: &str = "k8sv1-prd-w";
+const CONTEXT_NAME: &str = "k8sv1-prd";
+const CLUSTER_NAME: &str = "k8sv1-prd";
 
 #[derive(Debug, Clone)]
 struct ClusterConfig {
