@@ -229,16 +229,23 @@ func (p *MultipassProvider) GetNodeIP(ctx context.Context, nodeName string) (str
 	return status.IP, nil
 }
 
-// waitForCloudInit waits for cloud-init to complete on a node
+// waitForCloudInit waits for cloud-init to complete on a node with exponential backoff
 func (p *MultipassProvider) waitForCloudInit(ctx context.Context, nodeName string) error {
-	maxAttempts := 60 // 5 minutes
+	maxAttempts := 60
+	sleepDuration := 1 * time.Second // Start with 1s for faster detection
+	maxSleep := 10 * time.Second
+
 	for i := 0; i < maxAttempts; i++ {
 		cmd := exec.CommandContext(ctx, "multipass", "exec", nodeName, "--", "cloud-init", "status")
 		output, err := cmd.Output()
 
 		if err == nil {
 			status := strings.TrimSpace(string(output))
-			if strings.Contains(status, "status: done") {
+
+			// Check for running state (faster detection)
+			if strings.Contains(status, "status: running") {
+				sleepDuration = 2 * time.Second // Poll more frequently when running
+			} else if strings.Contains(status, "status: done") {
 				fmt.Printf("  ✓ %s is ready\n", nodeName)
 				return nil
 			}
@@ -247,9 +254,63 @@ func (p *MultipassProvider) waitForCloudInit(ctx context.Context, nodeName strin
 		if i > 0 && i%10 == 0 {
 			fmt.Printf("  Waiting for cloud-init on %s... (%d/%d)\n", nodeName, i+1, maxAttempts)
 		}
-		time.Sleep(5 * time.Second)
+
+		time.Sleep(sleepDuration)
+
+		// Exponential backoff with cap
+		sleepDuration = time.Duration(float64(sleepDuration) * 1.5)
+		if sleepDuration > maxSleep {
+			sleepDuration = maxSleep
+		}
 	}
 	return fmt.Errorf("timeout waiting for cloud-init on %s", nodeName)
+}
+
+// waitForPods waits for pods in a namespace with a specific label to be ready
+func (p *MultipassProvider) waitForPods(ctx context.Context, controlPlane, namespace, labelSelector string, timeoutSeconds int) error {
+	start := time.Now()
+	timeout := time.Duration(timeoutSeconds) * time.Second
+
+	for {
+		cmd := exec.CommandContext(ctx, "multipass", "exec", controlPlane, "--",
+			"kubectl", "get", "pods", "-n", namespace, "-l", labelSelector, "--no-headers")
+		output, err := cmd.Output()
+
+		if err == nil && len(strings.TrimSpace(string(output))) > 0 {
+			lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+			allReady := true
+
+			for _, line := range lines {
+				fields := strings.Fields(line)
+				if len(fields) < 3 {
+					continue
+				}
+				// Check if pod is Running and ready (e.g., "1/1" or "2/2")
+				status := fields[2]
+				readyStatus := fields[1]
+				if status != "Running" || !strings.Contains(readyStatus, "/") {
+					allReady = false
+					break
+				}
+				// Parse "1/1" format
+				parts := strings.Split(readyStatus, "/")
+				if len(parts) == 2 && parts[0] != parts[1] {
+					allReady = false
+					break
+				}
+			}
+
+			if allReady && len(lines) > 0 {
+				return nil
+			}
+		}
+
+		if time.Since(start) > timeout {
+			return fmt.Errorf("timeout waiting for pods in %s namespace with label %s", namespace, labelSelector)
+		}
+
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // getNodeIPFromMultipass retrieves node IP using multipass info JSON
@@ -439,9 +500,22 @@ func (p *MultipassProvider) installCNI(ctx context.Context, controlPlane, cniTyp
 		return fmt.Errorf("failed to install %s: %w\nOutput: %s", cniType, err, string(output))
 	}
 
-	// Wait for CNI to be ready
-	fmt.Printf("  Waiting for %s to be ready...\n", cniType)
-	time.Sleep(30 * time.Second)
+	// Wait for CNI to be ready using actual pod readiness checks
+	fmt.Printf("  Waiting for %s pods to be ready...\n", cniType)
+
+	var namespace, labelSelector string
+	switch strings.ToLower(cniType) {
+	case "flannel":
+		namespace = "kube-flannel"
+		labelSelector = "app=flannel"
+	case "calico":
+		namespace = "tigera-operator"
+		labelSelector = "k8s-app=tigera-operator"
+	}
+
+	if err := p.waitForPods(ctx, controlPlane, namespace, labelSelector, 120); err != nil {
+		return fmt.Errorf("CNI pods not ready: %w", err)
+	}
 
 	fmt.Printf("  ✓ %s installed\n", cniType)
 	return nil
@@ -459,9 +533,10 @@ func (p *MultipassProvider) joinWorker(ctx context.Context, workerName, joinComm
 	return nil
 }
 
-// waitForNodeReady waits for a node to become Ready in Kubernetes
+// waitForNodeReady waits for a node to become Ready in Kubernetes with adaptive polling
 func (p *MultipassProvider) waitForNodeReady(ctx context.Context, controlPlane, nodeName string, timeout time.Duration) error {
 	start := time.Now()
+	sleepDuration := 1 * time.Second // Start with faster polling
 
 	for {
 		cmd := exec.CommandContext(ctx, "multipass", "exec", controlPlane, "--",
@@ -477,7 +552,12 @@ func (p *MultipassProvider) waitForNodeReady(ctx context.Context, controlPlane, 
 			return fmt.Errorf("timeout waiting for node %s to be ready", nodeName)
 		}
 
-		time.Sleep(2 * time.Second)
+		time.Sleep(sleepDuration)
+
+		// Adaptive polling: gradually increase interval
+		if sleepDuration < 5*time.Second {
+			sleepDuration += 500 * time.Millisecond
+		}
 	}
 }
 
