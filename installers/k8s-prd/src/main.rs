@@ -561,7 +561,7 @@ fn is_node_ready(control_plane: &str, node_name: &str) -> bool {
     false
 }
 
-// Wait for all nodes to be ready with adaptive polling
+// Wait for all nodes to be ready with batched kubectl call and adaptive polling
 fn wait_for_nodes_ready(
     control_plane: &str,
     node_names: &[String],
@@ -572,12 +572,40 @@ fn wait_for_nodes_ready(
     let mut sleep_duration = Duration::from_secs(1); // Start with faster polling
 
     loop {
-        let all_ready = node_names
-            .iter()
-            .all(|name| is_node_ready(control_plane, name));
+        // Single kubectl call for all nodes - much more efficient
+        let output = Command::new("multipass")
+            .args(&[
+                "exec",
+                control_plane,
+                "--",
+                "kubectl",
+                "get",
+                "nodes",
+                "--no-headers",
+                "-o",
+                "custom-columns=NAME:.metadata.name,STATUS:.status.conditions[?(@.type=='Ready')].status",
+            ])
+            .output();
 
-        if all_ready {
-            return Ok(());
+        if let Ok(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut ready_map = std::collections::HashMap::new();
+
+            for line in stdout.trim().lines() {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() >= 2 {
+                    ready_map.insert(fields[0].to_string(), fields[1] == "True");
+                }
+            }
+
+            // Check if all requested nodes are ready
+            let all_ready = node_names.iter().all(|name| {
+                ready_map.get(name).copied().unwrap_or(false)
+            });
+
+            if all_ready {
+                return Ok(());
+            }
         }
 
         if start.elapsed() > timeout {

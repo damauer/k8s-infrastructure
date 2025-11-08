@@ -561,6 +561,56 @@ func (p *MultipassProvider) waitForNodeReady(ctx context.Context, controlPlane, 
 	}
 }
 
+// waitForNodesReady waits for all nodes to become Ready with batched kubectl call
+func (p *MultipassProvider) waitForNodesReady(ctx context.Context, controlPlane string, nodeNames []string, timeout time.Duration) error {
+	start := time.Now()
+	sleepDuration := 1 * time.Second // Start with faster polling
+
+	for {
+		// Single kubectl call for all nodes - much more efficient
+		cmd := exec.CommandContext(ctx, "multipass", "exec", controlPlane, "--",
+			"kubectl", "get", "nodes", "--no-headers",
+			"-o", "custom-columns=NAME:.metadata.name,STATUS:.status.conditions[?(@.type=='Ready')].status")
+		output, err := cmd.Output()
+
+		if err == nil {
+			readyMap := make(map[string]bool)
+			lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+
+			for _, line := range lines {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					readyMap[fields[0]] = fields[1] == "True"
+				}
+			}
+
+			// Check if all requested nodes are ready
+			allReady := true
+			for _, nodeName := range nodeNames {
+				if !readyMap[nodeName] {
+					allReady = false
+					break
+				}
+			}
+
+			if allReady {
+				return nil
+			}
+		}
+
+		if time.Since(start) > timeout {
+			return fmt.Errorf("timeout waiting for nodes to be ready after %v", timeout)
+		}
+
+		time.Sleep(sleepDuration)
+
+		// Adaptive polling: gradually increase interval
+		if sleepDuration < 5*time.Second {
+			sleepDuration += 500 * time.Millisecond
+		}
+	}
+}
+
 // DeployCluster creates and configures an entire cluster
 func (p *MultipassProvider) DeployCluster(ctx context.Context, config provider.ClusterConfig) error {
 	// Separate control plane and worker nodes
@@ -680,14 +730,16 @@ func (p *MultipassProvider) DeployCluster(ctx context.Context, config provider.C
 			return err
 		}
 
-		// Step 10: Wait for all nodes to be Ready
+		// Step 10: Wait for all nodes to be Ready (batched check for efficiency)
 		fmt.Printf("Waiting for all nodes to be ready...\n")
+		allNodeNames := []string{controlPlaneNode.Name}
 		for _, worker := range workerNodes {
-			if err := p.waitForNodeReady(ctx, controlPlaneNode.Name, worker.Name, 5*time.Minute); err != nil {
-				return err
-			}
-			fmt.Printf("  ✓ %s is ready\n", worker.Name)
+			allNodeNames = append(allNodeNames, worker.Name)
 		}
+		if err := p.waitForNodesReady(ctx, controlPlaneNode.Name, allNodeNames, 5*time.Minute); err != nil {
+			return err
+		}
+		fmt.Printf("  ✓ All nodes are ready\n")
 	}
 
 	fmt.Printf("✓ Cluster deployment complete\n")
