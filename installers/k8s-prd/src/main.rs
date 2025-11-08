@@ -427,6 +427,9 @@ fn launch_node(node: &NodeConfig, cloud_init_file: &str) -> Result<(), Box<dyn s
 
 fn wait_for_cloud_init(node_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let max_attempts = 60;
+    let mut sleep_duration = Duration::from_secs(1); // Start with 1s for faster detection
+    let max_sleep = Duration::from_secs(10);
+
     for i in 0..max_attempts {
         let output = Command::new("multipass")
             .args(&["exec", node_name, "--", "cloud-init", "status"])
@@ -434,17 +437,105 @@ fn wait_for_cloud_init(node_name: &str) -> Result<(), Box<dyn std::error::Error>
 
         if let Ok(output) = output {
             let status = String::from_utf8_lossy(&output.stdout);
-            if status.contains("status: done") {
+
+            // Check for running state (faster detection)
+            if status.contains("status: running") {
+                sleep_duration = Duration::from_secs(2); // Poll more frequently when running
+            } else if status.contains("status: done") {
                 println!("{}", format!("  ✓ {} is ready", node_name).green());
                 return Ok(());
             }
         }
 
-        thread::sleep(Duration::from_secs(5));
-        println!("  Attempt {}/{}...", i + 1, max_attempts);
+        if i > 0 && i % 10 == 0 {
+            println!("  Attempt {}/{}...", i + 1, max_attempts);
+        }
+
+        thread::sleep(sleep_duration);
+
+        // Exponential backoff with cap
+        sleep_duration = Duration::from_secs_f64(sleep_duration.as_secs_f64() * 1.5);
+        if sleep_duration > max_sleep {
+            sleep_duration = max_sleep;
+        }
     }
 
     Err(format!("Timeout waiting for cloud-init on {}", node_name).into())
+}
+
+// Wait for pods to be ready in a specific namespace with label selector
+fn wait_for_pods(
+    control_plane: &str,
+    namespace: &str,
+    label_selector: &str,
+    timeout_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let start = Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+
+    loop {
+        let output = Command::new("multipass")
+            .args(&[
+                "exec",
+                control_plane,
+                "--",
+                "kubectl",
+                "get",
+                "pods",
+                "-n",
+                namespace,
+                "-l",
+                label_selector,
+                "--no-headers",
+            ])
+            .output();
+
+        if let Ok(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout.trim().split('\n').filter(|l| !l.is_empty()).collect();
+
+            if !lines.is_empty() {
+                let mut all_ready = true;
+
+                for line in &lines {
+                    let fields: Vec<&str> = line.split_whitespace().collect();
+                    if fields.len() < 3 {
+                        continue;
+                    }
+
+                    // Check if pod is Running and ready (e.g., "1/1" or "2/2")
+                    let ready_status = fields[1];
+                    let status = fields[2];
+
+                    if status != "Running" || !ready_status.contains('/') {
+                        all_ready = false;
+                        break;
+                    }
+
+                    // Parse "1/1" format
+                    let parts: Vec<&str> = ready_status.split('/').collect();
+                    if parts.len() == 2 && parts[0] != parts[1] {
+                        all_ready = false;
+                        break;
+                    }
+                }
+
+                if all_ready {
+                    return Ok(());
+                }
+            }
+        }
+
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "Timeout waiting for pods in {} namespace with label {}",
+                namespace, label_selector
+            )
+            .into());
+        }
+
+        thread::sleep(Duration::from_secs(2));
+    }
 }
 
 // Smart polling function to check if a node is ready in Kubernetes
@@ -470,7 +561,7 @@ fn is_node_ready(control_plane: &str, node_name: &str) -> bool {
     false
 }
 
-// Wait for all nodes to be ready with smart polling
+// Wait for all nodes to be ready with adaptive polling
 fn wait_for_nodes_ready(
     control_plane: &str,
     node_names: &[String],
@@ -478,6 +569,7 @@ fn wait_for_nodes_ready(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
+    let mut sleep_duration = Duration::from_secs(1); // Start with faster polling
 
     loop {
         let all_ready = node_names
@@ -496,7 +588,12 @@ fn wait_for_nodes_ready(
             .into());
         }
 
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(sleep_duration);
+
+        // Adaptive polling: gradually increase interval
+        if sleep_duration < Duration::from_secs(5) {
+            sleep_duration += Duration::from_millis(500);
+        }
     }
 }
 
@@ -682,13 +779,21 @@ fn save_kubeconfig(config: &ClusterConfig) -> Result<(), Box<dyn std::error::Err
 }
 
 fn install_calico(config: &ClusterConfig) -> Result<(), Box<dyn std::error::Error>> {
-    // Install Flannel CNI (uses quay.io, avoids Docker Hub rate limiting)
-    println!("  Installing Flannel CNI...");
+    // Install Flannel CNI with correct Pod CIDR (uses quay.io, avoids Docker Hub rate limiting)
+    println!("  Installing Flannel CNI with Pod CIDR {}...", config.pod_cidr);
 
-    let install_cmd = "kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml";
+    // Download, patch, and apply Flannel manifest to match our Pod CIDR
+    let install_cmd = format!(
+        r#"
+        curl -sL https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml -o /tmp/kube-flannel.yml
+        sed -i 's|"Network": "10.244.0.0/16"|"Network": "{}"|' /tmp/kube-flannel.yml
+        kubectl apply -f /tmp/kube-flannel.yml
+        "#,
+        config.pod_cidr
+    );
 
     let output = Command::new("multipass")
-        .args(&["exec", &config.control_plane.name, "--", "bash", "-c", install_cmd])
+        .args(&["exec", &config.control_plane.name, "--", "bash", "-c", &install_cmd])
         .output()?;
 
     if !output.status.success() {
@@ -696,8 +801,9 @@ fn install_calico(config: &ClusterConfig) -> Result<(), Box<dyn std::error::Erro
         return Err("Failed to install Flannel".into());
     }
 
-    println!("  Waiting for Flannel to be ready...");
-    thread::sleep(Duration::from_secs(30));
+    // Wait for Flannel pods to be ready using actual pod readiness checks
+    println!("  Waiting for Flannel pods to be ready...");
+    wait_for_pods(&config.control_plane.name, "kube-flannel", "app=flannel", 120)?;
 
     println!("{}", "  ✓ Flannel CNI installed".green());
     Ok(())
@@ -708,9 +814,7 @@ fn install_metrics_server(control_plane_name: &str) -> Result<(), Box<dyn std::e
 
     let install_script = r#"
         kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
-        sleep 5
         kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]'
-        sleep 10
     "#;
 
     let output = Command::new("multipass")
@@ -722,8 +826,9 @@ fn install_metrics_server(control_plane_name: &str) -> Result<(), Box<dyn std::e
         return Err("Failed to install metrics-server".into());
     }
 
+    // Wait for metrics-server pods to be ready
     println!("  Waiting for metrics-server to be ready...");
-    thread::sleep(Duration::from_secs(20));
+    wait_for_pods(control_plane_name, "kube-system", "k8s-app=metrics-server", 120)?;
 
     println!("{}", "  ✓ metrics-server installed".green());
     Ok(())
@@ -759,7 +864,6 @@ fn install_kube_prometheus_stack(control_plane_name: &str) -> Result<(), Box<dyn
         helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             --namespace monitoring \
             --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
-        sleep 30
     "#;
 
     let output = Command::new("multipass")
@@ -771,8 +875,13 @@ fn install_kube_prometheus_stack(control_plane_name: &str) -> Result<(), Box<dyn
         return Err("Failed to install kube-prometheus-stack".into());
     }
 
-    println!("  Waiting for monitoring stack to be ready...");
-    thread::sleep(Duration::from_secs(30));
+    // Wait for Prometheus operator pods to be ready
+    println!("  Waiting for Prometheus operator to be ready...");
+    wait_for_pods(control_plane_name, "monitoring", "app=kube-prometheus-stack-operator", 120)?;
+
+    // Wait for Grafana to be ready
+    println!("  Waiting for Grafana to be ready...");
+    wait_for_pods(control_plane_name, "monitoring", "app.kubernetes.io/name=grafana", 120)?;
 
     println!("{}", "  ✓ kube-prometheus-stack installed".green());
     Ok(())
@@ -821,7 +930,6 @@ fn install_ingress_nginx(control_plane_name: &str) -> Result<(), Box<dyn std::er
 
     let install_script = r#"
         kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.9.4/deploy/static/provider/cloud/deploy.yaml
-        sleep 10
     "#;
 
     let output = Command::new("multipass")
@@ -833,8 +941,9 @@ fn install_ingress_nginx(control_plane_name: &str) -> Result<(), Box<dyn std::er
         return Err("Failed to install Ingress NGINX".into());
     }
 
+    // Wait for ingress controller pods to be ready
     println!("  Waiting for ingress controller to be ready...");
-    thread::sleep(Duration::from_secs(30));
+    wait_for_pods(control_plane_name, "ingress-nginx", "app.kubernetes.io/component=controller", 120)?;
 
     println!("{}", "  ✓ Ingress NGINX installed".green());
     Ok(())
