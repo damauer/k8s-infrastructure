@@ -201,15 +201,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "🌐 Exposing Grafana and Prometheus...".cyan().bold());
     expose_grafana(&config.control_plane.name)?;
 
-    // Get Grafana password
+    // Install ArgoCD
+    println!("{}", "🚀 Installing ArgoCD...".cyan().bold());
+    install_argocd(&config.control_plane.name)?;
+
+    // Expose ArgoCD
+    expose_argocd(&config.control_plane.name)?;
+    println!("{}", "  ✓ ArgoCD exposed on port 30081 (HTTP) and 30443 (HTTPS)".green());
+
+    // Get passwords
     let grafana_password = get_grafana_password(&config.control_plane.name)?;
+    let argocd_password = get_argocd_password(&config.control_plane.name)?;
 
     // Get control plane IP for access info
     let control_plane_ip = get_node_ip(&config.control_plane.name)?;
 
     // Display cluster status
     println!("\n{}", "✅ PROD Cluster installation complete!".green().bold());
-    display_cluster_info(&config, &control_plane_ip, &grafana_password);
+    display_cluster_info(&config, &control_plane_ip, &grafana_password, &argocd_password);
 
     Ok(())
 }
@@ -953,6 +962,65 @@ fn get_grafana_password(control_plane_name: &str) -> Result<String, Box<dyn std:
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn install_argocd(control_plane_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("  Installing ArgoCD...");
+
+    let install_script = r#"
+        kubectl create namespace argocd
+        kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+    "#;
+
+    let output = Command::new("multipass")
+        .args(&["exec", control_plane_name, "--", "bash", "-c", install_script])
+        .output()?;
+
+    if !output.status.success() {
+        println!("ArgoCD installation output: {}", String::from_utf8_lossy(&output.stdout));
+        return Err("Failed to install ArgoCD".into());
+    }
+
+    // Wait for ArgoCD server to be ready
+    println!("  Waiting for ArgoCD server to be ready...");
+    wait_for_pods(control_plane_name, "argocd", "app.kubernetes.io/name=argocd-server", 300)?;
+
+    println!("{}", "  ✓ ArgoCD installed".green());
+    Ok(())
+}
+
+fn expose_argocd(control_plane_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let expose_script = r#"
+        kubectl patch svc argocd-server -n argocd \
+            -p '{"spec": {"type": "NodePort", "ports": [{"name": "http", "port": 80, "nodePort": 30081, "targetPort": 8080}, {"name": "https", "port": 443, "nodePort": 30443, "targetPort": 8080}]}}'
+    "#;
+
+    let output = Command::new("multipass")
+        .args(&["exec", control_plane_name, "--", "bash", "-c", expose_script])
+        .output()?;
+
+    if !output.status.success() {
+        println!("ArgoCD exposure output: {}", String::from_utf8_lossy(&output.stdout));
+        return Err("Failed to expose ArgoCD".into());
+    }
+
+    Ok(())
+}
+
+fn get_argocd_password(control_plane_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let get_password_script = r#"
+        kubectl get secret -n argocd argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+    "#;
+
+    let output = Command::new("multipass")
+        .args(&["exec", control_plane_name, "--", "bash", "-c", get_password_script])
+        .output()?;
+
+    if !output.status.success() {
+        return Err("Failed to get ArgoCD password".into());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 fn install_ingress_nginx(control_plane_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Installing Ingress NGINX...");
 
@@ -1012,7 +1080,7 @@ fn get_ssh_public_key() -> String {
     String::new()
 }
 
-fn display_cluster_info(config: &ClusterConfig, control_plane_ip: &str, grafana_password: &str) {
+fn display_cluster_info(config: &ClusterConfig, control_plane_ip: &str, grafana_password: &str, argocd_password: &str) {
     println!("\n{}", "=".repeat(60));
     println!("{}", "🎉 Kubernetes PROD Cluster Ready!".green().bold());
     println!("{}", "=".repeat(60));
@@ -1027,6 +1095,7 @@ fn display_cluster_info(config: &ClusterConfig, control_plane_ip: &str, grafana_
     println!("  • Container Runtime:  containerd");
     println!("  • CNI Plugin:         Flannel");
     println!("  • Monitoring:         kube-prometheus-stack");
+    println!("  • GitOps:             ArgoCD");
     println!("  • Ingress:            NGINX Ingress Controller");
 
     println!("\n🖥️  Cluster Nodes:");
@@ -1035,11 +1104,14 @@ fn display_cluster_info(config: &ClusterConfig, control_plane_ip: &str, grafana_
         println!("  • Worker: {}", worker.name);
     }
 
-    println!("\n📊 Monitoring Stack:");
-    println!("  • Prometheus:  http://{}:30090", control_plane_ip);
+    println!("\n📊 Monitoring & GitOps:");
     println!("  • Grafana:     http://{}:30080", control_plane_ip);
-    println!("  • Username:    admin");
-    println!("  • Password:    {}", grafana_password);
+    println!("    Username:    admin");
+    println!("    Password:    {}", grafana_password);
+    println!("\n  • Prometheus:  http://{}:30090", control_plane_ip);
+    println!("\n  • ArgoCD:      http://{}:30081 (HTTPS: https://{}:30443)", control_plane_ip, control_plane_ip);
+    println!("    Username:    admin");
+    println!("    Password:    {}", argocd_password);
     println!("\n  {} Pre-configured Grafana dashboards including:", "28".cyan().bold());
     println!("  • Kubernetes / Compute Resources / Cluster");
     println!("  • Kubernetes / Networking / Cluster");
